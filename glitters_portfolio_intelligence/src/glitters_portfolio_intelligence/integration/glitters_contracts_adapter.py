@@ -12,6 +12,7 @@ from glitters_contracts import (
 
 from ..domain.entities import Portfolio, PropertyAsset
 from ..optimization.solver_backends import SolverExecutionResult
+from ..scenarios.validation import validate_scenario_distribution
 
 
 class GlittersContractsAdapter:
@@ -28,14 +29,28 @@ class GlittersContractsAdapter:
     ) -> PortfolioInvestmentBridge:
         """Constructs the canonical PortfolioInvestmentBridge DTO with exact holdings and volatility."""
         target_assets = assets if assets is not None else portfolio.assets
+        if len(solver_result.optimal_weights) != len(target_assets):
+            raise ValueError(
+                f"Length mismatch: solver optimal_weights ({len(solver_result.optimal_weights)}) "
+                f"does not match target assets ({len(target_assets)})"
+            )
+
         holdings = []
         for i, a in enumerate(target_assets):
-            if i < len(solver_result.optimal_weights):
-                w = float(solver_result.optimal_weights[i])
-                holdings.append((a.asset_id, round(w, 4)))
+            w = float(solver_result.optimal_weights[i])
+            holdings.append((a.asset_id, round(w, 4)))
 
         total_cents = portfolio.total_portfolio_value_cents
-        rebal = any(abs(w - (1.0 / max(1, len(target_assets)))) > 0.05 for _, w in holdings)
+        current_holdings_map: dict[str, float] = {}
+        if total_cents > 0:
+            for p_asset in portfolio.assets:
+                p_val = p_asset.current_valuation_cents * p_asset.initial_ownership_fraction
+                current_holdings_map[p_asset.asset_id] = p_val / total_cents
+
+        rebal = any(
+            abs(w_rec - current_holdings_map.get(aid, 0.0)) > 0.005
+            for aid, w_rec in holdings
+        )
 
         # Compute empirical scenario volatility if provided
         if (
@@ -44,12 +59,13 @@ class GlittersContractsAdapter:
             and len(solver_result.optimal_weights) == scenario_returns.shape[0]
             and len(scenario_probabilities) > 0
         ):
+            _, valid_probs = validate_scenario_distribution(scenario_returns, scenario_probabilities)
             port_scen_returns = solver_result.optimal_weights @ scenario_returns
-            mu = float(np.sum(scenario_probabilities * port_scen_returns))
-            var = float(np.sum(scenario_probabilities * ((port_scen_returns - mu) ** 2)))
+            mu = float(np.sum(valid_probs * port_scen_returns))
+            var = float(np.sum(valid_probs * ((port_scen_returns - mu) ** 2)))
             volatility = float(np.sqrt(max(0.0, var)))
         else:
-            volatility = abs(solver_result.cvar_alpha)
+            volatility = 0.0
 
         return PortfolioInvestmentBridge(
             portfolio_id=portfolio.portfolio_id,

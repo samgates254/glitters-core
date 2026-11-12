@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from typing import Optional, Sequence, Tuple
 from uuid import UUID, uuid4
 import numpy as np
@@ -26,6 +27,7 @@ from glitters_contracts import (
 from ..domain.entities import Portfolio, PropertyAsset
 from ..domain.enums import OptimizationStatus, ScenarioProvenanceKind
 from ..optimization.solver_backends import SolverExecutionResult
+from ..scenarios.validation import validate_scenario_distribution
 
 
 class InvestmentDecisionGovernanceGate:
@@ -33,7 +35,8 @@ class InvestmentDecisionGovernanceGate:
     Enforces strict GLITTERS governance:
     Engine 08 is strictly advisory and CANNOT execute transactions or post financial entries.
     All binding capital deployment or rebalancing requires Investment Committee sign-off.
-    Enforces tenant organization isolation and auditable algorithmic decision envelopes.
+    Enforces tenant organization isolation, input provenance verification,
+    distinct solver status mapping, and rigorous statistical uncertainty characterization.
     """
 
     @classmethod
@@ -46,13 +49,14 @@ class InvestmentDecisionGovernanceGate:
         scenario_returns: Optional[np.ndarray] = None,
         scenario_probabilities: Optional[np.ndarray] = None,
         provenance: Optional[ScenarioProvenanceKind] = None,
+        scenario_evidence_verified: Optional[bool] = None,
         policy_id: str = "POL-PORTFOLIO-ALLOCATION-2026",
         threshold_for_committee_cents: int = 10_000_000_00,  # KES 10M
     ) -> AlgorithmDecisionEnvelope[PortfolioInvestmentBridge]:
         """
         Packages solver results into an auditable AlgorithmDecisionEnvelope[PortfolioInvestmentBridge].
         Strictly enforces tenant isolation between caller and portfolio.
-        Computes empirical scenario volatility and effective sample size.
+        Calculates empirical scenario volatility, sample standard error, and true portfolio holding delta.
         """
         # 1. Enforce strict tenant isolation boundary
         if str(caller.tenant_org_id) != str(portfolio.tenant_org_id):
@@ -65,40 +69,69 @@ class InvestmentDecisionGovernanceGate:
         execution_id = uuid4()
         decision_id = uuid4()
 
-        # 2. Map holdings strictly from provided assets or portfolio assets
+        # 2. Map holdings strictly from provided assets or portfolio assets with length verification
         target_assets = assets if assets is not None else portfolio.assets
+        if len(solver_result.optimal_weights) != len(target_assets):
+            raise ValueError(
+                f"Length mismatch: solver optimal_weights length ({len(solver_result.optimal_weights)}) "
+                f"does not match target assets length ({len(target_assets)})"
+            )
+
         holdings: list[tuple[str, float]] = []
         for i, a in enumerate(target_assets):
-            if i < len(solver_result.optimal_weights):
-                w = float(solver_result.optimal_weights[i])
-                holdings.append((a.asset_id, round(w, 4)))
+            w = float(solver_result.optimal_weights[i])
+            holdings.append((a.asset_id, round(w, 4)))
 
-        # 3. Compute empirical scenario volatility and effective sample size
-        n_scens = len(scenario_probabilities) if scenario_probabilities is not None else 0
-        if (
+        # 3. Compute empirical scenario volatility, sample standard error, and effective sample size
+        has_scenario_inputs = (
             scenario_returns is not None
             and scenario_probabilities is not None
             and len(solver_result.optimal_weights) == scenario_returns.shape[0]
-            and n_scens > 0
-        ):
-            # Portfolio scenario returns: R_s^{port} = sum_i x_i R_{is}
-            port_scen_returns = solver_result.optimal_weights @ scenario_returns
-            mu = float(np.sum(scenario_probabilities * port_scen_returns))
-            var = float(np.sum(scenario_probabilities * ((port_scen_returns - mu) ** 2)))
-            portfolio_volatility = float(np.sqrt(max(0.0, var)))
-            eff_sample_size = float(1.0 / np.sum(scenario_probabilities ** 2))
-        else:
-            # Fallback to conservative CVaR-derived risk estimate if raw scenarios omitted
-            portfolio_volatility = abs(solver_result.cvar_alpha)
-            eff_sample_size = float(max(1, len(holdings)))
+            and len(scenario_probabilities) > 0
+        )
 
-        # 4. Determine if committee approval is required
+        if has_scenario_inputs:
+            # Validate probabilities strictly
+            _, valid_probs = validate_scenario_distribution(scenario_returns, scenario_probabilities)
+            port_scen_returns = solver_result.optimal_weights @ scenario_returns
+            mu = float(np.sum(valid_probs * port_scen_returns))
+            var = float(np.sum(valid_probs * ((port_scen_returns - mu) ** 2)))
+            portfolio_volatility = float(np.sqrt(max(0.0, var)))
+            eff_sample_size = float(1.0 / np.sum(valid_probs ** 2))
+            # Standard error of the expected return point estimate
+            std_err = portfolio_volatility / math.sqrt(max(1.0, eff_sample_size))
+            unc_lower = solver_result.expected_return - 1.96 * std_err
+            unc_upper = solver_result.expected_return + 1.96 * std_err
+            interval_type = "STANDARD_ERROR_NORMAL_95"
+            epistemic_status = "ESTIMATED_SAMPLE_CONFIDENCE_INTERVAL" if solver_result.is_optimal else "FAILED_OR_INFEASIBLE"
+        else:
+            # Explicit unsupported/missing state: NEVER use CVaR as fallback volatility!
+            portfolio_volatility = 0.0
+            eff_sample_size = 0.0
+            unc_lower = float("nan")
+            unc_upper = float("nan")
+            interval_type = "UNAVAILABLE_MISSING_SCENARIOS"
+            epistemic_status = "UNSUPPORTED_NO_SCENARIOS"
+
+        # 4. Compare recommended holdings to actual current portfolio holdings (not equal weights)
         total_val_cents = portfolio.total_portfolio_value_cents
-        rebalancing_needed = any(abs(w - (1.0 / max(1, len(target_assets)))) > 0.05 for _, w in holdings)
+        current_holdings_map: dict[str, float] = {}
+        if total_val_cents > 0:
+            for p_asset in portfolio.assets:
+                p_val = p_asset.current_valuation_cents * p_asset.initial_ownership_fraction
+                current_holdings_map[p_asset.asset_id] = p_val / total_val_cents
+
+        rebalancing_needed = any(
+            abs(w_rec - current_holdings_map.get(aid, 0.0)) > 0.005
+            for aid, w_rec in holdings
+        )
+
+        # 5. Strict CORE Fiduciary Gate: Any capital deployment or rebalancing requires Committee signoff
         requires_committee = (
-            total_val_cents >= threshold_for_committee_cents
-            or rebalancing_needed
+            rebalancing_needed
+            or total_val_cents >= threshold_for_committee_cents
             or not solver_result.is_optimal
+            or any(w > 0.01 for _, w in holdings)
         )
 
         bridge_dto = PortfolioInvestmentBridge(
@@ -121,7 +154,7 @@ class InvestmentDecisionGovernanceGate:
             escalation_timeout_hours=48,
         )
 
-        # 5. Canonical SHA256 decision payload hash
+        # 6. Canonical SHA256 decision payload hash
         payload_dict = {
             "portfolio_id": bridge_dto.portfolio_id,
             "tenant_org_id": str(bridge_dto.tenant_org_id),
@@ -150,38 +183,52 @@ class InvestmentDecisionGovernanceGate:
             requires_human_approval=requires_committee,
         )
 
-        # 6. Map OptimizationStatus to AlgorithmicExecutionStatus and AbstentionReason
+        # 7. Map OptimizationStatus to distinct AlgorithmicExecutionStatus and AbstentionReason
         status_map = {
             OptimizationStatus.OPTIMAL: (AlgorithmicExecutionStatus.OPTIMAL, AbstentionReason.NONE),
             OptimizationStatus.FEASIBLE: (AlgorithmicExecutionStatus.FEASIBLE_APPROXIMATE, AbstentionReason.NONE),
-            OptimizationStatus.TIME_LIMIT: (AlgorithmicExecutionStatus.INFEASIBLE, AbstentionReason.SOLVER_TIMEOUT),
+            OptimizationStatus.TIME_LIMIT: (AlgorithmicExecutionStatus.CONFLICTING_CONSTRAINTS, AbstentionReason.SOLVER_TIMEOUT),
+            OptimizationStatus.UNBOUNDED: (AlgorithmicExecutionStatus.ABSTAINED_POLICY_VIOLATION, AbstentionReason.HARD_CONSTRAINT_VIOLATION),
             OptimizationStatus.INFEASIBLE: (AlgorithmicExecutionStatus.INFEASIBLE, AbstentionReason.CONFLICTING_CONSTRAINTS),
-            OptimizationStatus.UNBOUNDED: (AlgorithmicExecutionStatus.INFEASIBLE, AbstentionReason.HARD_CONSTRAINT_VIOLATION),
-            OptimizationStatus.UNKNOWN: (AlgorithmicExecutionStatus.INFEASIBLE, AbstentionReason.CONFLICTING_CONSTRAINTS),
+            OptimizationStatus.UNKNOWN: (AlgorithmicExecutionStatus.ABSTAINED_INSUFFICIENT_DATA, AbstentionReason.INSUFFICIENT_DATA),
         }
         status_mapped, abstention_reason = status_map.get(
             solver_result.status,
-            (AlgorithmicExecutionStatus.INFEASIBLE, AbstentionReason.CONFLICTING_CONSTRAINTS),
+            (AlgorithmicExecutionStatus.ABSTAINED_INSUFFICIENT_DATA, AbstentionReason.INSUFFICIENT_DATA),
         )
 
-        # 7. Confidence Tier based on data provenance
+        # 8. Rigorous Confidence Tier based on evidenced provenance (not just solver optimality)
+        effective_prov = provenance
+        effective_verified = scenario_evidence_verified
+
+        if effective_prov is None:
+            # When caller does not specify provenance (legacy default), treat as historical
+            effective_prov = ScenarioProvenanceKind.HISTORICAL_OBSERVATION
+            effective_verified = (scenario_evidence_verified is not False)
+        elif effective_verified is None:
+            effective_verified = False
+
         if solver_result.is_optimal:
-            if provenance in (None, ScenarioProvenanceKind.HISTORICAL_OBSERVATION, ScenarioProvenanceKind.STATISTICAL_FORECAST):
+            if effective_prov == ScenarioProvenanceKind.HISTORICAL_OBSERVATION and effective_verified:
                 conf_tier = ConfidenceTier.HIGH_CONFIDENCE
-            elif provenance == ScenarioProvenanceKind.EXPERT_ASSUMPTION:
+            elif effective_prov in (
+                ScenarioProvenanceKind.HISTORICAL_OBSERVATION,
+                ScenarioProvenanceKind.STATISTICAL_FORECAST,
+                ScenarioProvenanceKind.EXPERT_ASSUMPTION,
+            ):
                 conf_tier = ConfidenceTier.MODERATE_CONFIDENCE
-            elif provenance == ScenarioProvenanceKind.SYNTHETIC_SCENARIO:
+            elif effective_prov == ScenarioProvenanceKind.SYNTHETIC_SCENARIO:
                 conf_tier = ConfidenceTier.WEAKLY_SUPPORTED
             else:
-                conf_tier = ConfidenceTier.MODERATE_CONFIDENCE
+                conf_tier = ConfidenceTier.WEAKLY_SUPPORTED
         else:
             conf_tier = ConfidenceTier.WEAKLY_SUPPORTED
 
         explanation = DecisionExplanation(
             summary_narrative=(
                 f"Optimized portfolio recommendation for {len(target_assets)} assets using Rockafellar-Uryasev Mean-CVaR. "
-                f"Expected annual return: {solver_result.expected_return:.2%}, CVaR_95: {solver_result.cvar_alpha:.2%}, "
-                f"Volatility: {portfolio_volatility:.2%}."
+                f"Expected net annual return: {solver_result.expected_return:.2%}, Net CVaR_95: {solver_result.cvar_alpha:.2%}, "
+                f"Empirical Volatility: {portfolio_volatility:.2%}."
             ),
             feature_attributions={
                 "expected_return": solver_result.expected_return,
@@ -201,12 +248,12 @@ class InvestmentDecisionGovernanceGate:
             confidence_tier=conf_tier,
             uncertainty=UncertaintyBounds(
                 point_estimate=solver_result.expected_return,
-                lower_bound=solver_result.expected_return - solver_result.cvar_alpha,
-                upper_bound=solver_result.expected_return + solver_result.cvar_alpha,
+                lower_bound=unc_lower,
+                upper_bound=unc_upper,
                 confidence_level=0.95,
-                interval_type="ROCKAFELLAR_CVAR_95",
+                interval_type=interval_type,
                 effective_sample_size=eff_sample_size,
-                epistemic_status="CONVERGED_OPTIMAL" if solver_result.is_optimal else "FAILED_OR_INFEASIBLE",
+                epistemic_status=epistemic_status,
             ),
             explanation=explanation,
             payload=bridge_dto,

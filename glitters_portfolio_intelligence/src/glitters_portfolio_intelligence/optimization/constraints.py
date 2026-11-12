@@ -15,6 +15,7 @@ class PortfolioConstraints:
     """
     Comprehensive portfolio linear and mixed-integer constraints.
     Validates all parameters strictly; no declared constraint is silently ignored.
+    Enforces finite values and legitimate boundaries for all constraint fields.
     """
     min_cash_reserve_weight: float = 0.05
     max_single_asset_weight: float = 0.35
@@ -31,30 +32,52 @@ class PortfolioConstraints:
     max_cardinality: Optional[int] = None
 
     def __post_init__(self) -> None:
-        if not (0.0 <= self.min_cash_reserve_weight < 1.0):
-            raise ValueError(f"min_cash_reserve_weight must be in [0, 1), got {self.min_cash_reserve_weight}")
-        if not (0.0 < self.max_single_asset_weight <= 1.0):
-            raise ValueError(f"max_single_asset_weight must be in (0, 1], got {self.max_single_asset_weight}")
-        if self.max_portfolio_ltv < 0.0:
-            raise ValueError(f"max_portfolio_ltv cannot be negative: {self.max_portfolio_ltv}")
-        if self.min_portfolio_dscr < 0.0:
-            raise ValueError(f"min_portfolio_dscr cannot be negative: {self.min_portfolio_dscr}")
-        if self.max_capex_budget_cents is not None and self.max_capex_budget_cents < 0:
-            raise ValueError(f"max_capex_budget_cents cannot be negative: {self.max_capex_budget_cents}")
-        if not (0.0 <= self.buy_transaction_cost_rate <= 1.0):
-            raise ValueError(f"buy_transaction_cost_rate must be in [0, 1]: {self.buy_transaction_cost_rate}")
-        if not (0.0 <= self.sell_transaction_cost_rate <= 1.0):
-            raise ValueError(f"sell_transaction_cost_rate must be in [0, 1]: {self.sell_transaction_cost_rate}")
-        if not (0.0 <= self.min_holding_weight <= self.max_single_asset_weight):
+        if not math.isfinite(self.min_cash_reserve_weight) or not (0.0 <= self.min_cash_reserve_weight < 1.0):
+            raise ValueError(f"min_cash_reserve_weight must be a finite float in [0, 1), got {self.min_cash_reserve_weight}")
+
+        if not math.isfinite(self.max_single_asset_weight) or not (0.0 < self.max_single_asset_weight <= 1.0):
+            raise ValueError(f"max_single_asset_weight must be a finite float in (0, 1], got {self.max_single_asset_weight}")
+
+        if not math.isfinite(self.max_portfolio_ltv) or self.max_portfolio_ltv < 0.0:
+            raise ValueError(f"max_portfolio_ltv must be a finite non-negative float: {self.max_portfolio_ltv}")
+
+        if not math.isfinite(self.min_portfolio_dscr) or self.min_portfolio_dscr < 0.0:
+            raise ValueError(f"min_portfolio_dscr must be a finite non-negative float: {self.min_portfolio_dscr}")
+
+        if self.max_capex_budget_cents is not None:
+            if not isinstance(self.max_capex_budget_cents, int) or self.max_capex_budget_cents < 0:
+                raise ValueError(f"max_capex_budget_cents must be an integer >= 0, got {self.max_capex_budget_cents}")
+
+        if not math.isfinite(self.buy_transaction_cost_rate) or not (0.0 <= self.buy_transaction_cost_rate <= 1.0):
+            raise ValueError(f"buy_transaction_cost_rate must be a finite float in [0, 1]: {self.buy_transaction_cost_rate}")
+
+        if not math.isfinite(self.sell_transaction_cost_rate) or not (0.0 <= self.sell_transaction_cost_rate <= 1.0):
+            raise ValueError(f"sell_transaction_cost_rate must be a finite float in [0, 1]: {self.sell_transaction_cost_rate}")
+
+        if not math.isfinite(self.min_holding_weight) or not (0.0 <= self.min_holding_weight <= self.max_single_asset_weight):
             raise ValueError(
-                f"min_holding_weight ({self.min_holding_weight}) must be in [0, max_single_asset_weight ({self.max_single_asset_weight})]"
+                f"min_holding_weight ({self.min_holding_weight}) must be a finite float in [0, max_single_asset_weight ({self.max_single_asset_weight})]"
             )
-        if self.max_cardinality is not None and self.max_cardinality < 1:
-            raise ValueError(f"max_cardinality must be >= 1, got {self.max_cardinality}")
+
+        if self.max_cardinality is not None:
+            if not isinstance(self.max_cardinality, int) or self.max_cardinality < 1:
+                raise ValueError(f"max_cardinality must be an integer >= 1, got {self.max_cardinality}")
+
+        for submarket, w in self.max_geographic_weights.items():
+            if not isinstance(submarket, GeographicSubmarket):
+                raise ValueError(f"Invalid geographic submarket key: {submarket}")
+            if not math.isfinite(w) or not (0.0 <= w <= 1.0):
+                raise ValueError(f"Geographic weight for {submarket} must be a finite float in [0, 1], got {w}")
+
+        for category, w in self.max_category_weights.items():
+            if not isinstance(category, AssetCategory):
+                raise ValueError(f"Invalid asset category key: {category}")
+            if not math.isfinite(w) or not (0.0 <= w <= 1.0):
+                raise ValueError(f"Category weight for {category} must be a finite float in [0, 1], got {w}")
 
         if self.max_turnover_rate is not None:
-            if self.max_turnover_rate < 0.0:
-                raise ValueError(f"max_turnover_rate cannot be negative: {self.max_turnover_rate}")
+            if not math.isfinite(self.max_turnover_rate) or self.max_turnover_rate < 0.0:
+                raise ValueError(f"max_turnover_rate must be a finite non-negative float: {self.max_turnover_rate}")
             if self.initial_weights is None:
                 raise ValueError("max_turnover_rate requires initial_weights to be specified")
 
@@ -91,6 +114,7 @@ def build_linear_constraint_matrices(
     """
     Builds the linear inequality constraint matrix A_ub @ x <= b_ub for portfolio weights x.
     Uses exact cash-flow accounting for DSCR consistency.
+    Enforces explicit zero CapEx budget as a legitimate upper bound.
 
     Returns:
       A_ub: 2D array of constraint coefficients (n_constraints, n_assets)
@@ -130,7 +154,8 @@ def build_linear_constraint_matrices(
     labels.append(f"Portfolio DSCR >= {constraints.min_portfolio_dscr:.2f}")
 
     # 4. CapEx budget constraint: sum_i x_i * (total_capital_cents / val_i) * capex_i <= max_capex_budget_cents
-    if constraints.max_capex_budget_cents is not None and constraints.max_capex_budget_cents > 0:
+    # Zero budget is enforced as a legitimate upper bound
+    if constraints.max_capex_budget_cents is not None and constraints.max_capex_budget_cents >= 0:
         capex_row = []
         for a in assets:
             val = max(1, a.current_valuation_cents)

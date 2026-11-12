@@ -24,6 +24,14 @@ class CVaRVerificationResult:
     discrepancy: float
     is_verified: bool
 
+    @property
+    def cvar_alpha(self) -> float:
+        return self.cvar
+
+    @property
+    def var_alpha(self) -> float:
+        return self.var
+
 
 def compute_rockafellar_cvar_1d(
     losses: Sequence[float],
@@ -105,3 +113,25 @@ def compute_rockafellar_cvar_1d(
         discrepancy=discrepancy,
         is_verified=is_verified,
     )
+
+
+class CVaREmpiricalVerifier:
+    """
+    Empirical verifier facade for discrete CVaR calculations.
+    """
+    @staticmethod
+    def compute_empirical_cvar_from_losses(
+        scenario_losses: Sequence[float],
+        scenario_probabilities: Sequence[float],
+        alpha: float = 0.95,
+        tolerance: float = 1e-4,
+    ) -> CVaRVerificationResult:
+        return compute_rockafellar_cvar_1d(
+            losses=scenario_losses,
+            probabilities=scenario_probabilities,
+            alpha=alpha,
+            tolerance=tolerance,
+        )
+
+
+DiscreteEmpiricalCVaRVerifier = CVaREmpiricalVerifier

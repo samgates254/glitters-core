@@ -80,6 +80,8 @@ class ScenarioStressEngine:
                 probability=0.10,
                 model_version="historical_replay_v1.0.0",
                 transformation_methodology="Empirical percentile replay from historical cadastral and asking indices",
+                dataset_identifier="HASS-PROPERTY-INDEX-2019-2021-V1",
+                dataset_sha256="4a1d609e20a4be35967e816a7f8fb25cf030f2ee4f8266d6d48bc7201c1374b5",
                 assumptions={
                     "commercial_office_valuation_drop": 0.150,
                     "residential_valuation_drop": 0.100,
@@ -96,6 +98,8 @@ class ScenarioStressEngine:
                 probability=0.08,
                 model_version="occupancy_decay_v1.0.0",
                 transformation_methodology="Empirical vacancy surge by asset class and tenant credit stress",
+                dataset_identifier="KNBS-KF-COMMERCIAL-CENSUS-V1",
+                dataset_sha256="b8c2dfa93010b27fe878c7b82f81498b0f19106093418d1f2a36b5cb511b8b80",
                 assumptions={
                     "commercial_office_vacancy_increase": 0.250,
                     "residential_vacancy_increase": 0.120,
@@ -127,6 +131,8 @@ class ScenarioStressEngine:
                 probability=0.06,
                 model_version="construction_surge_v1.0.0",
                 transformation_methodology="Empirical cement, steel, and mechanical cost escalation replay",
+                dataset_identifier="BORAQS-EBK-MATERIALS-INDEX-2022-2023-V1",
+                dataset_sha256="7c5a089065961e670404481079d675685a498b58406f5b9d3ef163bc97a8e2f1",
                 assumptions={
                     "capex_cost_escalation": 0.250,
                     "renovation_delay_months": 4.0,

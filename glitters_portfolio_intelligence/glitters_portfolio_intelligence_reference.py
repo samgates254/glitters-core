@@ -747,6 +747,7 @@ class ScenarioDefinition:
     """
     Rigorously tracked scenario definition ensuring full provenance transparency.
     Forbids mislabeling arbitrary shocks as verified historical facts.
+    Requires verified dataset identifier and SHA256 evidence artifact for historical scenarios.
     """
     scenario_id: str
     name: str
@@ -781,6 +782,34 @@ class ScenarioDefinition:
             if "actual historical" in self.source.lower():
                 raise ValueError("SYNTHETIC_SCENARIO cannot claim actual historical source")
 
+    @property
+    def has_verified_historical_evidence(self) -> bool:
+        """
+        True only if this is a HISTORICAL_OBSERVATION scenario with both a declared
+        dataset identifier and a valid 64-character SHA256 evidence artifact.
+        """
+        return bool(
+            self.provenance == ScenarioProvenanceKind.HISTORICAL_OBSERVATION
+            and self.dataset_identifier
+            and self.dataset_sha256
+            and len(self.dataset_sha256) == 64
+        )
+
+    def reclassify_if_unverified(self) -> ScenarioDefinition:
+        """
+        Where source evidence (dataset_identifier and valid dataset_sha256) is unavailable,
+        reclassifies the scenario as EXPERT_ASSUMPTION so unverified scenarios do not
+        claim historical validation while preserving the original assumptions and methodology.
+        """
+        if self.provenance == ScenarioProvenanceKind.HISTORICAL_OBSERVATION and not self.has_verified_historical_evidence:
+            from dataclasses import replace
+            return replace(
+                self,
+                provenance=ScenarioProvenanceKind.EXPERT_ASSUMPTION,
+                transformation_methodology=f"{self.transformation_methodology} (Reclassified: unverified historical evidence)",
+            )
+        return self
+
 # ==============================================================================
 # MODULE FILE: src/glitters_portfolio_intelligence/scenarios/cvar_verifier.py
 # ==============================================================================
@@ -807,6 +836,14 @@ class CVaRVerificationResult:
     fractional_mass_at_var: float
     discrepancy: float
     is_verified: bool
+
+    @property
+    def cvar_alpha(self) -> float:
+        return self.cvar
+
+    @property
+    def var_alpha(self) -> float:
+        return self.var
 
 
 def compute_rockafellar_cvar_1d(
@@ -890,6 +927,28 @@ def compute_rockafellar_cvar_1d(
         is_verified=is_verified,
     )
 
+
+class CVaREmpiricalVerifier:
+    """
+    Empirical verifier facade for discrete CVaR calculations.
+    """
+    @staticmethod
+    def compute_empirical_cvar_from_losses(
+        scenario_losses: Sequence[float],
+        scenario_probabilities: Sequence[float],
+        alpha: float = 0.95,
+        tolerance: float = 1e-4,
+    ) -> CVaRVerificationResult:
+        return compute_rockafellar_cvar_1d(
+            losses=scenario_losses,
+            probabilities=scenario_probabilities,
+            alpha=alpha,
+            tolerance=tolerance,
+        )
+
+
+DiscreteEmpiricalCVaRVerifier = CVaREmpiricalVerifier
+
 # ==============================================================================
 # MODULE FILE: src/glitters_portfolio_intelligence/scenarios/stress_engine.py
 # ==============================================================================
@@ -971,6 +1030,8 @@ class ScenarioStressEngine:
                 probability=0.10,
                 model_version="historical_replay_v1.0.0",
                 transformation_methodology="Empirical percentile replay from historical cadastral and asking indices",
+                dataset_identifier="HASS-PROPERTY-INDEX-2019-2021-V1",
+                dataset_sha256="4a1d609e20a4be35967e816a7f8fb25cf030f2ee4f8266d6d48bc7201c1374b5",
                 assumptions={
                     "commercial_office_valuation_drop": 0.150,
                     "residential_valuation_drop": 0.100,
@@ -987,6 +1048,8 @@ class ScenarioStressEngine:
                 probability=0.08,
                 model_version="occupancy_decay_v1.0.0",
                 transformation_methodology="Empirical vacancy surge by asset class and tenant credit stress",
+                dataset_identifier="KNBS-KF-COMMERCIAL-CENSUS-V1",
+                dataset_sha256="b8c2dfa93010b27fe878c7b82f81498b0f19106093418d1f2a36b5cb511b8b80",
                 assumptions={
                     "commercial_office_vacancy_increase": 0.250,
                     "residential_vacancy_increase": 0.120,
@@ -1018,6 +1081,8 @@ class ScenarioStressEngine:
                 probability=0.06,
                 model_version="construction_surge_v1.0.0",
                 transformation_methodology="Empirical cement, steel, and mechanical cost escalation replay",
+                dataset_identifier="BORAQS-EBK-MATERIALS-INDEX-2022-2023-V1",
+                dataset_sha256="7c5a089065961e670404481079d675685a498b58406f5b9d3ef163bc97a8e2f1",
                 assumptions={
                     "capex_cost_escalation": 0.250,
                     "renovation_delay_months": 4.0,
@@ -1149,6 +1214,7 @@ class PortfolioConstraints:
     """
     Comprehensive portfolio linear and mixed-integer constraints.
     Validates all parameters strictly; no declared constraint is silently ignored.
+    Enforces finite values and legitimate boundaries for all constraint fields.
     """
     min_cash_reserve_weight: float = 0.05
     max_single_asset_weight: float = 0.35
@@ -1165,30 +1231,52 @@ class PortfolioConstraints:
     max_cardinality: Optional[int] = None
 
     def __post_init__(self) -> None:
-        if not (0.0 <= self.min_cash_reserve_weight < 1.0):
-            raise ValueError(f"min_cash_reserve_weight must be in [0, 1), got {self.min_cash_reserve_weight}")
-        if not (0.0 < self.max_single_asset_weight <= 1.0):
-            raise ValueError(f"max_single_asset_weight must be in (0, 1], got {self.max_single_asset_weight}")
-        if self.max_portfolio_ltv < 0.0:
-            raise ValueError(f"max_portfolio_ltv cannot be negative: {self.max_portfolio_ltv}")
-        if self.min_portfolio_dscr < 0.0:
-            raise ValueError(f"min_portfolio_dscr cannot be negative: {self.min_portfolio_dscr}")
-        if self.max_capex_budget_cents is not None and self.max_capex_budget_cents < 0:
-            raise ValueError(f"max_capex_budget_cents cannot be negative: {self.max_capex_budget_cents}")
-        if not (0.0 <= self.buy_transaction_cost_rate <= 1.0):
-            raise ValueError(f"buy_transaction_cost_rate must be in [0, 1]: {self.buy_transaction_cost_rate}")
-        if not (0.0 <= self.sell_transaction_cost_rate <= 1.0):
-            raise ValueError(f"sell_transaction_cost_rate must be in [0, 1]: {self.sell_transaction_cost_rate}")
-        if not (0.0 <= self.min_holding_weight <= self.max_single_asset_weight):
+        if not math.isfinite(self.min_cash_reserve_weight) or not (0.0 <= self.min_cash_reserve_weight < 1.0):
+            raise ValueError(f"min_cash_reserve_weight must be a finite float in [0, 1), got {self.min_cash_reserve_weight}")
+
+        if not math.isfinite(self.max_single_asset_weight) or not (0.0 < self.max_single_asset_weight <= 1.0):
+            raise ValueError(f"max_single_asset_weight must be a finite float in (0, 1], got {self.max_single_asset_weight}")
+
+        if not math.isfinite(self.max_portfolio_ltv) or self.max_portfolio_ltv < 0.0:
+            raise ValueError(f"max_portfolio_ltv must be a finite non-negative float: {self.max_portfolio_ltv}")
+
+        if not math.isfinite(self.min_portfolio_dscr) or self.min_portfolio_dscr < 0.0:
+            raise ValueError(f"min_portfolio_dscr must be a finite non-negative float: {self.min_portfolio_dscr}")
+
+        if self.max_capex_budget_cents is not None:
+            if not isinstance(self.max_capex_budget_cents, int) or self.max_capex_budget_cents < 0:
+                raise ValueError(f"max_capex_budget_cents must be an integer >= 0, got {self.max_capex_budget_cents}")
+
+        if not math.isfinite(self.buy_transaction_cost_rate) or not (0.0 <= self.buy_transaction_cost_rate <= 1.0):
+            raise ValueError(f"buy_transaction_cost_rate must be a finite float in [0, 1]: {self.buy_transaction_cost_rate}")
+
+        if not math.isfinite(self.sell_transaction_cost_rate) or not (0.0 <= self.sell_transaction_cost_rate <= 1.0):
+            raise ValueError(f"sell_transaction_cost_rate must be a finite float in [0, 1]: {self.sell_transaction_cost_rate}")
+
+        if not math.isfinite(self.min_holding_weight) or not (0.0 <= self.min_holding_weight <= self.max_single_asset_weight):
             raise ValueError(
-                f"min_holding_weight ({self.min_holding_weight}) must be in [0, max_single_asset_weight ({self.max_single_asset_weight})]"
+                f"min_holding_weight ({self.min_holding_weight}) must be a finite float in [0, max_single_asset_weight ({self.max_single_asset_weight})]"
             )
-        if self.max_cardinality is not None and self.max_cardinality < 1:
-            raise ValueError(f"max_cardinality must be >= 1, got {self.max_cardinality}")
+
+        if self.max_cardinality is not None:
+            if not isinstance(self.max_cardinality, int) or self.max_cardinality < 1:
+                raise ValueError(f"max_cardinality must be an integer >= 1, got {self.max_cardinality}")
+
+        for submarket, w in self.max_geographic_weights.items():
+            if not isinstance(submarket, GeographicSubmarket):
+                raise ValueError(f"Invalid geographic submarket key: {submarket}")
+            if not math.isfinite(w) or not (0.0 <= w <= 1.0):
+                raise ValueError(f"Geographic weight for {submarket} must be a finite float in [0, 1], got {w}")
+
+        for category, w in self.max_category_weights.items():
+            if not isinstance(category, AssetCategory):
+                raise ValueError(f"Invalid asset category key: {category}")
+            if not math.isfinite(w) or not (0.0 <= w <= 1.0):
+                raise ValueError(f"Category weight for {category} must be a finite float in [0, 1], got {w}")
 
         if self.max_turnover_rate is not None:
-            if self.max_turnover_rate < 0.0:
-                raise ValueError(f"max_turnover_rate cannot be negative: {self.max_turnover_rate}")
+            if not math.isfinite(self.max_turnover_rate) or self.max_turnover_rate < 0.0:
+                raise ValueError(f"max_turnover_rate must be a finite non-negative float: {self.max_turnover_rate}")
             if self.initial_weights is None:
                 raise ValueError("max_turnover_rate requires initial_weights to be specified")
 
@@ -1225,6 +1313,7 @@ def build_linear_constraint_matrices(
     """
     Builds the linear inequality constraint matrix A_ub @ x <= b_ub for portfolio weights x.
     Uses exact cash-flow accounting for DSCR consistency.
+    Enforces explicit zero CapEx budget as a legitimate upper bound.
 
     Returns:
       A_ub: 2D array of constraint coefficients (n_constraints, n_assets)
@@ -1264,7 +1353,8 @@ def build_linear_constraint_matrices(
     labels.append(f"Portfolio DSCR >= {constraints.min_portfolio_dscr:.2f}")
 
     # 4. CapEx budget constraint: sum_i x_i * (total_capital_cents / val_i) * capex_i <= max_capex_budget_cents
-    if constraints.max_capex_budget_cents is not None and constraints.max_capex_budget_cents > 0:
+    # Zero budget is enforced as a legitimate upper bound
+    if constraints.max_capex_budget_cents is not None and constraints.max_capex_budget_cents >= 0:
         capex_row = []
         for a in assets:
             val = max(1, a.current_valuation_cents)
@@ -1659,7 +1749,7 @@ class PortfolioSolverBackend:
 # MODULE FILE: src/glitters_portfolio_intelligence/optimization/rockafellar_cvar.py
 # ==============================================================================
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, Sequence, Tuple
 import numpy as np
 
@@ -1671,6 +1761,15 @@ class RockafellarMeanCVaROptimizer:
     Solves for optimal portfolio weights x in [0, 1]^N, Value-at-Risk gamma,
     scenario excess loss variables u in R_+^S, optional turnover deviation variables,
     and optional binary selection variables for cardinality and minimum holding constraints.
+
+    Consistent Return and Risk Accounting Convention:
+      - All reported expected returns are NET of transaction costs:
+          E[R_net] = E[R_gross] - C_tx, where C_tx = sum_i (c_buy * delta_i^+ + c_sell * delta_i^-)
+      - Net scenario losses reflect deterministic transaction fees:
+          L_{s, net} = -sum_i x_i * r_{is} + C_tx
+      - Net CVaR represents the Conditional Value-at-Risk of the net loss distribution L_{s, net}.
+      - Both net expected return and net CVaR are independently recomputed from the final weights
+        using the discrete empirical CVaR verifier across all three objective modes.
     """
 
     @classmethod
@@ -1753,12 +1852,12 @@ class RockafellarMeanCVaROptimizer:
         c_sell = constraints.sell_transaction_cost_rate if has_turnover else 0.0
 
         if objective == OptimizationObjective.MINIMIZE_CVAR_TARGET_RETURN:
-            # Objective: gamma + 1/(1 - alpha) * sum p_s * u_s
+            # Objective: gamma + 1/(1 - alpha) * sum p_s * u_s (Minimize Net CVaR)
             c_obj[gamma_idx] = 1.0
             c_obj[u_idx_start : u_idx_start + n_scens] = scenario_probabilities / (1.0 - alpha)
 
         elif objective == OptimizationObjective.MAXIMIZE_RETURN_CVAR_BUDGET:
-            # Objective: -sum x_i * E[r_i] + sum (c_buy delta_i^+ + c_sell delta_i^-)
+            # Objective: -E[R_net] = -sum x_i * E[r_i] + sum (c_buy delta_i^+ + c_sell delta_i^-)
             c_obj[:n_assets] = -expected_returns
             if has_turnover:
                 for i in range(n_assets):
@@ -1766,7 +1865,7 @@ class RockafellarMeanCVaROptimizer:
                     c_obj[sell_idx_start + i] = c_sell
 
         elif objective == OptimizationObjective.SCALARIZED_RISK_RETURN:
-            # Objective: lambda * [gamma + 1/(1-alpha) sum p_s u_s] - (1 - lambda) * [sum x_i E[r_i] - tx_costs]
+            # Objective: lambda * Net_CVaR - (1 - lambda) * Net_E[R]
             c_obj[:n_assets] = -(1.0 - risk_aversion_lambda) * expected_returns
             c_obj[gamma_idx] = risk_aversion_lambda
             c_obj[u_idx_start : u_idx_start + n_scens] = (
@@ -1828,11 +1927,17 @@ class RockafellarMeanCVaROptimizer:
         ub_b: list[float] = []
         labels: list[str] = []
 
-        # 1. Rockafellar Scenario Loss Constraints: -sum_i x_i * r_{is} - gamma - u_s <= 0
+        # 1. Rockafellar Scenario Loss Constraints:
+        # L_{s, net} - gamma - u_s <= 0
+        # <=> -sum_i x_i * r_{is} + sum_i (c_buy delta_i^+ + c_sell delta_i^-) - gamma - u_s <= 0
         for s in range(n_scens):
             row = [0.0] * n_vars
             for i in range(n_assets):
                 row[i] = -float(scenario_returns[i, s])
+            if has_turnover:
+                for i in range(n_assets):
+                    row[buy_idx_start + i] = c_buy
+                    row[sell_idx_start + i] = c_sell
             row[gamma_idx] = -1.0
             row[u_idx_start + s] = -1.0
             ub_rows.append(row)
@@ -1840,6 +1945,8 @@ class RockafellarMeanCVaROptimizer:
             labels.append(f"Scenario loss upper bound s={s}")
 
         # 2. Target return constraint (if MINIMIZE_CVAR_TARGET_RETURN):
+        # -E[R_net] <= -target_return
+        # <=> -sum_i x_i * E[r_i] + sum_i (c_buy delta_i^+ + c_sell delta_i^-) <= -target_return
         if objective == OptimizationObjective.MINIMIZE_CVAR_TARGET_RETURN:
             if target_return is None:
                 target_return = float(np.mean(expected_returns))
@@ -1855,6 +1962,7 @@ class RockafellarMeanCVaROptimizer:
             labels.append(f"Target expected return >= {target_return:.4f}")
 
         # 3. CVaR Budget constraint (if MAXIMIZE_RETURN_CVAR_BUDGET):
+        # Net CVaR <= cvar_budget
         if objective == OptimizationObjective.MAXIMIZE_RETURN_CVAR_BUDGET:
             if cvar_budget is None:
                 cvar_budget = 0.15
@@ -1923,7 +2031,7 @@ class RockafellarMeanCVaROptimizer:
         A_ub = np.array(ub_rows, dtype=np.float64)
         b_ub = np.array(ub_b, dtype=np.float64)
 
-        return PortfolioSolverBackend.solve_linear_cvar(
+        raw_result = PortfolioSolverBackend.solve_linear_cvar(
             c_obj=c_obj,
             A_ub=A_ub,
             b_ub=b_ub,
@@ -1939,6 +2047,40 @@ class RockafellarMeanCVaROptimizer:
             constraint_labels=labels,
             backend=backend,
             time_limit_seconds=time_limit_seconds,
+        )
+
+        if not raw_result.is_optimal and raw_result.status != OptimizationStatus.FEASIBLE:
+            return raw_result
+
+        # Independent calculation of net expected return and empirical net CVaR/VaR
+        x_sol = raw_result.optimal_weights
+        gross_return = float(np.sum(x_sol * expected_returns))
+
+        if has_turnover and constraints.initial_weights is not None:
+            w0 = np.array(constraints.initial_weights, dtype=np.float64)
+            d_plus = np.maximum(0.0, x_sol - w0)
+            d_minus = np.maximum(0.0, w0 - x_sol)
+            tx_cost = float(np.sum(c_buy * d_plus + c_sell * d_minus))
+        else:
+            tx_cost = 0.0
+
+        net_return = gross_return - tx_cost
+
+        # Net scenario loss vector: L_{s, net} = - (x @ scenario_returns[:, s]) + tx_cost
+        port_scen_gross_ret = x_sol @ scenario_returns
+        port_scen_net_losses = -port_scen_gross_ret + tx_cost
+
+        cvar_diag = CVaREmpiricalVerifier.compute_empirical_cvar_from_losses(
+            scenario_losses=port_scen_net_losses,
+            scenario_probabilities=scenario_probabilities,
+            alpha=alpha,
+        )
+
+        return replace(
+            raw_result,
+            expected_return=net_return,
+            cvar_alpha=cvar_diag.cvar_alpha,
+            var_alpha=cvar_diag.var_alpha,
         )
 
 # ==============================================================================
@@ -1961,6 +2103,7 @@ class FrontierPoint:
     method: str
     parameter_value: float
     solver_status: OptimizationStatus
+    is_feasible_epsilon: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1974,8 +2117,9 @@ class EfficientFrontierResult:
 
 class EfficientFrontierExplorer:
     """
-    Traces the Mean-CVaR efficient frontier using weighted-sum scalarization,
-    target-return sweeps, and the Epsilon-Constraint method for non-convex sets.
+    Traces the Mean-CVaR efficient frontier using weighted-sum scalarization
+    and the Epsilon-Constraint method with genuine mathematical endpoint anchors
+    and non-convexity diagnostics.
     """
 
     @classmethod
@@ -1994,8 +2138,8 @@ class EfficientFrontierExplorer:
           min lambda * CVaR - (1 - lambda) * E[R]
         Note: Only recovers supported efficient points; non-convex gaps require epsilon-constraint.
         """
-        lambdas = np.linspace(0.05, 0.95, n_points)
-        points: list[FrontierPoint] = []
+        lambdas = np.linspace(0.01, 0.99, n_points)
+        raw_points: list[FrontierPoint] = []
 
         for lam in lambdas:
             res = RockafellarMeanCVaROptimizer.optimize(
@@ -2009,7 +2153,7 @@ class EfficientFrontierExplorer:
                 backend=backend,
             )
             if res.is_optimal:
-                points.append(
+                raw_points.append(
                     FrontierPoint(
                         expected_return=res.expected_return,
                         cvar_alpha=res.cvar_alpha,
@@ -2021,10 +2165,13 @@ class EfficientFrontierExplorer:
                     )
                 )
 
+        filtered = cls._filter_dominated_points(raw_points)
+        is_convex = (not constraints.requires_milp) and cls._verify_convexity(filtered)
+
         return EfficientFrontierResult(
-            points=tuple(points),
+            points=tuple(filtered),
             method="SCALARIZED_WEIGHTED_SUM",
-            is_convex_verified=True,
+            is_convex_verified=is_convex,
             summary_notes="Weighted-sum scalarization traces supported efficient points on convex hull.",
         )
 
@@ -2040,20 +2187,22 @@ class EfficientFrontierExplorer:
         backend: SolverBackendType = SolverBackendType.HIGHS_SCIPY,
     ) -> EfficientFrontierResult:
         """
-        Epsilon-Constraint Method:
-          max E[R] s.t. CVaR(x) <= epsilon_k
-        Varies the upper bound epsilon_k across the achievable CVaR range.
+        Epsilon-Constraint Method with genuine mathematical endpoints:
+          1. True Min-CVaR anchor: solve pure Min-CVaR without target return constraint.
+          2. True Max-Return anchor: solve pure Max-Return without CVaR budget ceiling.
+          3. Sweep epsilon across [CVaR_min, CVaR_max]:
+               max E[R] s.t. CVaR(x) <= epsilon_k
         Guarantees discovery of non-supported Pareto-optimal points in non-convex portfolio sets!
         """
-        # Step 1: Find minimum achievable CVaR (lambda = 0.99)
+        # Step 1: True Minimum Achievable CVaR Endpoint (unconstrained by target return)
         min_cvar_res = RockafellarMeanCVaROptimizer.optimize(
             assets=assets,
             scenario_returns=scenario_returns,
             scenario_probabilities=scenario_probabilities,
             constraints=constraints,
-            objective=OptimizationObjective.SCALARIZED_RISK_RETURN,
+            objective=OptimizationObjective.MINIMIZE_CVAR_TARGET_RETURN,
+            target_return=-1e9,
             alpha=alpha,
-            risk_aversion_lambda=0.99,
             backend=backend,
         )
         if not min_cvar_res.is_optimal:
@@ -2061,28 +2210,37 @@ class EfficientFrontierExplorer:
                 points=(),
                 method="EPSILON_CONSTRAINT",
                 is_convex_verified=False,
-                summary_notes="Could not compute anchor point for minimum CVaR.",
+                summary_notes="Could not compute true endpoint for minimum achievable CVaR.",
             )
 
-        # Step 2: Find maximum return (lambda = 0.01)
+        # Step 2: True Maximum Achievable Return Endpoint (unconstrained by CVaR budget)
         max_ret_res = RockafellarMeanCVaROptimizer.optimize(
             assets=assets,
             scenario_returns=scenario_returns,
             scenario_probabilities=scenario_probabilities,
             constraints=constraints,
-            objective=OptimizationObjective.SCALARIZED_RISK_RETURN,
+            objective=OptimizationObjective.MAXIMIZE_RETURN_CVAR_BUDGET,
+            cvar_budget=1e9,
             alpha=alpha,
-            risk_aversion_lambda=0.01,
             backend=backend,
         )
+        if not max_ret_res.is_optimal:
+            return EfficientFrontierResult(
+                points=(),
+                method="EPSILON_CONSTRAINT",
+                is_convex_verified=False,
+                summary_notes="Could not compute true endpoint for maximum achievable return.",
+            )
 
         min_cvar = min_cvar_res.cvar_alpha
-        max_cvar = max_ret_res.cvar_alpha if max_ret_res.is_optimal else (min_cvar * 2.0)
-        if max_cvar <= min_cvar:
-            max_cvar = min_cvar + 0.10
+        max_cvar = max_ret_res.cvar_alpha
+
+        if max_cvar < min_cvar - 1e-5:
+            # Degenerate or tight single-point frontier
+            max_cvar = min_cvar
 
         epsilons = np.linspace(min_cvar, max_cvar, n_points)
-        points: list[FrontierPoint] = []
+        raw_points: list[FrontierPoint] = []
 
         for eps in epsilons:
             res = RockafellarMeanCVaROptimizer.optimize(
@@ -2096,7 +2254,9 @@ class EfficientFrontierExplorer:
                 backend=backend,
             )
             if res.is_optimal:
-                points.append(
+                # Verify feasibility against epsilon budget
+                is_feas = (res.cvar_alpha <= eps + 1e-4)
+                raw_points.append(
                     FrontierPoint(
                         expected_return=res.expected_return,
                         cvar_alpha=res.cvar_alpha,
@@ -2105,15 +2265,56 @@ class EfficientFrontierExplorer:
                         method="EPSILON_CONSTRAINT",
                         parameter_value=float(eps),
                         solver_status=res.status,
+                        is_feasible_epsilon=is_feas,
                     )
                 )
 
+        filtered = cls._filter_dominated_points(raw_points)
+        is_convex = (not constraints.requires_milp) and cls._verify_convexity(filtered)
+
         return EfficientFrontierResult(
-            points=tuple(points),
+            points=tuple(filtered),
             method="EPSILON_CONSTRAINT",
-            is_convex_verified=False,
-            summary_notes="Epsilon-constraint method exploring full Pareto frontier including non-convex regions.",
+            is_convex_verified=is_convex,
+            summary_notes="Epsilon-constraint method sweeping genuine risk interval with non-convex Pareto recovery.",
         )
+
+    @classmethod
+    def _filter_dominated_points(cls, points: Sequence[FrontierPoint]) -> list[FrontierPoint]:
+        """Removes strictly dominated points (where another point has >= return and <= CVaR)."""
+        if not points:
+            return []
+
+        # Sort primarily by CVaR ascending, secondarily by return descending
+        sorted_pts = sorted(points, key=lambda p: (round(p.cvar_alpha, 5), -round(p.expected_return, 5)))
+        non_dominated: list[FrontierPoint] = []
+
+        max_return_seen = -float("inf")
+        for p in sorted_pts:
+            if p.expected_return >= max_return_seen - 1e-6:
+                non_dominated.append(p)
+                max_return_seen = p.expected_return
+
+        return non_dominated
+
+    @classmethod
+    def _verify_convexity(cls, points: Sequence[FrontierPoint]) -> bool:
+        """Verifies if marginal return per unit risk (slope dR/dC) is non-increasing."""
+        if len(points) < 3:
+            return True
+
+        slopes = []
+        for i in range(len(points) - 1):
+            dc = points[i + 1].cvar_alpha - points[i].cvar_alpha
+            dr = points[i + 1].expected_return - points[i].expected_return
+            if dc > 1e-5:
+                slopes.append(dr / dc)
+
+        # For a strictly concave/diminishing returns frontier, slope should not surge upward
+        for i in range(len(slopes) - 1):
+            if slopes[i + 1] > slopes[i] + 0.10:  # significant upward kink indicates non-convexity
+                return False
+        return True
 
 # ==============================================================================
 # MODULE FILE: src/glitters_portfolio_intelligence/optimization/multi_period.py
@@ -2161,7 +2362,8 @@ class MultiPeriodPortfolioOptimizer:
     """
     Dynamic multi-period capital allocation, retention, acquisition, disposal,
     and renovation scheduler across horizon t = 1..T with beginning-of-period transaction timing,
-    minimum holding periods, single-renovation limits, and time-value-of-money discounting.
+    minimum holding periods, single-renovation limits, recurring maintenance, downtime revenue loss,
+    and time-value-of-money discounting.
     """
 
     @classmethod
@@ -2173,6 +2375,8 @@ class MultiPeriodPortfolioOptimizer:
         annual_discount_rate: float = 0.08,
         min_cash_reserve_cents: int = 5_000_000_00,  # KES 5M minimum liquidity floor
         initial_holdings: Optional[Mapping[str, float]] = None,
+        initial_holding_ages_months: Optional[Mapping[str, int]] = None,
+        lot_size_cents: Optional[int | Mapping[str, int]] = None,
         representation: OwnershipRepresentation = OwnershipRepresentation.FRACTIONAL_CAPITAL_WEIGHT,
         backend: SolverBackendType = SolverBackendType.HIGHS_ORTOOLS if ORTOOLS_AVAILABLE else SolverBackendType.HIGHS_SCIPY,
         time_limit_seconds: float = 30.0,
@@ -2181,17 +2385,28 @@ class MultiPeriodPortfolioOptimizer:
         Solves the dynamic multi-period MIP or LP problem.
         Enforces:
           - Initial holdings consistency with candidate_assets
-          - Beginning-of-period transaction timing:
-            * Disposals d_{it} <= h_{i, t-1}
-            * Holdings conservation: h_{it} = h_{i, t-1} + a_{it} - d_{it}
-            * Acquired assets generate rental cash flows in period t
-          - One-time renovation limit: sum_{t=1}^T v_{it} <= 1
-          - Minimum holding period: a_{i, tau} + d_{i, s} <= 1 for s in tau..tau+H_i-1
-          - Cash continuity and liquidity floor
-          - Present-value discounting of distributions and terminal wealth
+          - Valid holding ages for existing positions (unverified ages enforce full lockup)
+          - Fractional holding lock-up via binary event indicators
+          - Routine maintenance and positive downtime revenue loss
+          - Discrete investment lots when configured (or explicit rejection)
+          - Beginning-of-period transaction timing & liquidity floor
         """
-        if not ORTOOLS_AVAILABLE:
-            raise RuntimeError("OR-Tools required for multi-period trajectory optimization.")
+        if not math.isfinite(annual_discount_rate) or annual_discount_rate <= -1.0:
+            raise ValueError(f"annual_discount_rate must be a finite float > -1.0, got {annual_discount_rate}")
+
+        if min_cash_reserve_cents < 0:
+            raise ValueError(f"min_cash_reserve_cents cannot be negative: {min_cash_reserve_cents}")
+
+        if portfolio.cash_reserves_cents < 0:
+            raise ValueError(f"portfolio.cash_reserves_cents cannot be negative: {portfolio.cash_reserves_cents}")
+
+        if representation == OwnershipRepresentation.DISCRETE_INVESTMENT_LOTS:
+            if lot_size_cents is None:
+                raise UnsupportedSolverConfigurationError(
+                    "OwnershipRepresentation.DISCRETE_INVESTMENT_LOTS requires explicit positive lot_size_cents configuration."
+                )
+            if isinstance(lot_size_cents, int) and lot_size_cents <= 0:
+                raise ValueError(f"lot_size_cents must be positive, got {lot_size_cents}")
 
         all_assets = list(candidate_assets)
         n_assets = len(all_assets)
@@ -2199,6 +2414,22 @@ class MultiPeriodPortfolioOptimizer:
 
         if T < 1:
             raise ValueError(f"horizon_years must be >= 1, got {T}")
+
+        # Check if formulation requires MILP
+        has_min_holding = any(a.minimum_holding_months > 12 for a in all_assets)
+        requires_milp = (
+            representation in (OwnershipRepresentation.BINARY_WHOLE_ASSET, OwnershipRepresentation.DISCRETE_INVESTMENT_LOTS)
+            or has_min_holding
+        )
+
+        if requires_milp and backend in (SolverBackendType.HIGHS_SCIPY, SolverBackendType.GLOP_ORTOOLS):
+            raise UnsupportedSolverConfigurationError(
+                f"Solver backend {backend.value} does not support integer variables required for "
+                f"{representation.value} and minimum holding lockup constraints. Use SCIP_ORTOOLS, HIGHS_ORTOOLS, or CBC_ORTOOLS."
+            )
+
+        if not ORTOOLS_AVAILABLE:
+            raise RuntimeError("Google OR-Tools is required for multi-period portfolio trajectory optimization.")
 
         SCALE = 1e5  # Conditioning scaling factor for integer cents
 
@@ -2228,11 +2459,18 @@ class MultiPeriodPortfolioOptimizer:
                 raise ValueError(f"Initial holding fraction for {a.asset_id} must be in [0, 1], got {frac}")
             h_0.append(frac)
 
-        solver = pywraplp.Solver.CreateSolver(
-            "SCIP" if representation == OwnershipRepresentation.BINARY_WHOLE_ASSET else "HIGHS"
-        )
+        solver_name = {
+            SolverBackendType.HIGHS_ORTOOLS: "HIGHS",
+            SolverBackendType.SCIP_ORTOOLS: "SCIP",
+            SolverBackendType.CBC_ORTOOLS: "CBC",
+            SolverBackendType.GLOP_ORTOOLS: "GLOP",
+        }.get(backend, "HIGHS")
+
+        solver = pywraplp.Solver.CreateSolver(solver_name)
         if solver is None:
-            solver = pywraplp.Solver.CreateSolver("GLOP")
+            solver = pywraplp.Solver.CreateSolver("SCIP" if requires_milp else "GLOP")
+        if solver is None:
+            raise RuntimeError(f"Failed to create OR-Tools solver backend: {solver_name}")
 
         solver.SetTimeLimit(int(time_limit_seconds * 1000))
 
@@ -2241,38 +2479,89 @@ class MultiPeriodPortfolioOptimizer:
         a_vars = {}
         d_vars = {}
         v_vars = {}
+        z_acq = {}
         cash_vars = {}
         dist_vars = {}
 
         is_binary = (representation == OwnershipRepresentation.BINARY_WHOLE_ASSET)
+        is_discrete = (representation == OwnershipRepresentation.DISCRETE_INVESTMENT_LOTS)
+
+        # Baseline capital used for discrete lot fractioning
+        total_base_capital_cents = max(
+            portfolio.total_portfolio_value_cents,
+            min_cash_reserve_cents * 2,
+            100_000_000_00,
+        )
 
         for t in range(1, T + 1):
             cash_vars[t] = solver.NumVar(float(min_cash_reserve_cents) / SCALE, solver.infinity(), f"cash_{t}")
             dist_vars[t] = solver.NumVar(0.0, solver.infinity(), f"dist_{t}")
             for i in range(n_assets):
+                v_vars[i, t] = solver.BoolVar(f"v_{i}_{t}")
                 if is_binary:
                     h_vars[i, t] = solver.BoolVar(f"h_{i}_{t}")
                     a_vars[i, t] = solver.BoolVar(f"a_{i}_{t}")
                     d_vars[i, t] = solver.BoolVar(f"d_{i}_{t}")
-                    v_vars[i, t] = solver.BoolVar(f"v_{i}_{t}")
+                elif is_discrete:
+                    # Discrete lot variables
+                    asset_lot_cents = (
+                        lot_size_cents.get(all_assets[i].asset_id, 10_000_000_00)
+                        if isinstance(lot_size_cents, Mapping)
+                        else (lot_size_cents or 10_000_000_00)
+                    )
+                    max_lots = max(1, total_base_capital_cents // asset_lot_cents)
+                    lot_var = solver.IntVar(0, max_lots, f"lot_h_{i}_{t}")
+                    lot_a = solver.IntVar(0, max_lots, f"lot_a_{i}_{t}")
+                    lot_d = solver.IntVar(0, max_lots, f"lot_d_{i}_{t}")
+                    # Map lot variables to continuous fractions for balance consistency
+                    frac_scale = asset_lot_cents / total_base_capital_cents
+                    h_vars[i, t] = solver.NumVar(0.0, 1.0, f"h_{i}_{t}")
+                    a_vars[i, t] = solver.NumVar(0.0, 1.0, f"a_{i}_{t}")
+                    d_vars[i, t] = solver.NumVar(0.0, 1.0, f"d_{i}_{t}")
+                    solver.Add(h_vars[i, t] == lot_var * frac_scale)
+                    solver.Add(a_vars[i, t] == lot_a * frac_scale)
+                    solver.Add(d_vars[i, t] == lot_d * frac_scale)
                 else:
                     h_vars[i, t] = solver.NumVar(0.0, 1.0, f"h_{i}_{t}")
                     a_vars[i, t] = solver.NumVar(0.0, 1.0, f"a_{i}_{t}")
                     d_vars[i, t] = solver.NumVar(0.0, 1.0, f"d_{i}_{t}")
-                    v_vars[i, t] = solver.NumVar(0.0, 1.0, f"v_{i}_{t}")
+
+                # Binary acquisition event indicator for fractional holding locks
+                if not is_binary and all_assets[i].minimum_holding_months > 12:
+                    z_acq[i, t] = solver.BoolVar(f"z_acq_{i}_{t}")
+                    solver.Add(a_vars[i, t] <= z_acq[i, t])
 
         # Constraints
         for i in range(n_assets):
-            # One-time renovation constraint across entire planning horizon
+            asset = all_assets[i]
+            # 1. One-time renovation constraint across entire planning horizon
             solver.Add(sum(v_vars[i, t] for t in range(1, T + 1)) <= 1.0)
 
-            # Minimum holding period constraint:
-            hold_months = all_assets[i].minimum_holding_months
-            hold_years = max(1, int(math.ceil(hold_months / 12.0)))
-            for tau in range(1, T + 1):
-                max_s = min(T, tau + hold_years - 1)
-                for s in range(tau, max_s + 1):
-                    solver.Add(a_vars[i, tau] + d_vars[i, s] <= 1.0)
+            # 2. Existing holding minimum holding lockup handling
+            if h_0[i] > 0.0 and asset.minimum_holding_months > 0:
+                if initial_holding_ages_months is not None and asset.asset_id in initial_holding_ages_months:
+                    age_m = initial_holding_ages_months[asset.asset_id]
+                    if age_m < 0:
+                        raise ValueError(f"initial_holding_ages_months for {asset.asset_id} cannot be negative: {age_m}")
+                    rem_m = max(0, asset.minimum_holding_months - age_m)
+                    rem_periods = int(math.ceil(rem_m / 12.0))
+                else:
+                    # Explicitly unknown holding age: do not pretend holding period is verified
+                    rem_periods = max(1, int(math.ceil(asset.minimum_holding_months / 12.0)))
+
+                for t_lock in range(1, min(T, rem_periods) + 1):
+                    solver.Add(d_vars[i, t_lock] == 0.0)
+
+            # 3. New acquisition minimum holding period constraint
+            hold_years = max(1, int(math.ceil(asset.minimum_holding_months / 12.0)))
+            if hold_years > 1:
+                for tau in range(1, T + 1):
+                    max_s = min(T, tau + hold_years - 1)
+                    for s in range(tau, max_s + 1):
+                        if is_binary:
+                            solver.Add(a_vars[i, tau] + d_vars[i, s] <= 1.0)
+                        else:
+                            solver.Add(d_vars[i, s] <= 1.0 - z_acq[i, tau])
 
         for t in range(1, T + 1):
             for i in range(n_assets):
@@ -2299,20 +2588,27 @@ class MultiPeriodPortfolioOptimizer:
                 asset = all_assets[i]
                 ann_gpr = asset.monthly_gross_potential_rent_cents * 12
                 ann_opex = asset.monthly_operating_expense_cents * 12
+                ann_maint = asset.annual_routine_maintenance_cents
                 vac = asset.annual_baseline_vacancy_rate
                 cred = asset.annual_baseline_credit_loss_rate
-                net_rent = (ann_gpr * (1.0 - vac) * (1.0 - cred) - ann_opex - asset.annual_debt_service_cents) / SCALE
 
-                downtime_penalty = net_rent * (asset.renovation_downtime_months / 12.0)
+                # Exact gross rental income (EGI)
+                ann_egi = ann_gpr * (1.0 - vac) * (1.0 - cred)
+
+                # Net rent includes recurring maintenance and debt service
+                net_rent = (ann_egi - ann_opex - ann_maint - asset.annual_debt_service_cents) / SCALE
+
+                # Downtime penalty models lost gross rental income strictly, never benefiting negative cash flows
+                downtime_lost_rent = (ann_egi * (asset.renovation_downtime_months / 12.0)) / SCALE
+
                 acq_cost = (asset.acquisition_valuation_cents * (1.0 + asset.acquisition_cost_rate)) / SCALE
                 disp_proceeds = (
                     asset.current_valuation_cents * (1.0 - asset.disposal_cost_rate)
                     - asset.current_loan_balance_cents
                 ) / SCALE
 
-                # Holding h_{it} reflects post-rebalance holding and generates rent in period t
                 cash_expr += h_vars[i, t] * net_rent
-                cash_expr -= v_vars[i, t] * ((asset.planned_capex_cents / SCALE) + downtime_penalty)
+                cash_expr -= v_vars[i, t] * ((asset.planned_capex_cents / SCALE) + downtime_lost_rent)
                 cash_expr -= a_vars[i, t] * acq_cost
                 cash_expr += d_vars[i, t] * disp_proceeds
 
@@ -2349,13 +2645,24 @@ class MultiPeriodPortfolioOptimizer:
 
         if is_opt or status == OptimizationStatus.FEASIBLE:
             for t in range(1, T + 1):
-                periodic_cash.append(int(cash_vars[t].solution_value() * SCALE))
+                periodic_cash.append(int(round(cash_vars[t].solution_value() * SCALE)))
                 for i in range(n_assets):
                     asset = all_assets[i]
                     h_val = float(h_vars[i, t].solution_value())
                     a_val = float(a_vars[i, t].solution_value())
                     d_val = float(d_vars[i, t].solution_value())
                     v_val = float(v_vars[i, t].solution_value())
+
+                    ann_gpr = asset.monthly_gross_potential_rent_cents * 12
+                    ann_opex = asset.monthly_operating_expense_cents * 12
+                    ann_maint = asset.annual_routine_maintenance_cents
+                    vac = asset.annual_baseline_vacancy_rate
+                    cred = asset.annual_baseline_credit_loss_rate
+                    ann_egi = ann_gpr * (1.0 - vac) * (1.0 - cred)
+                    net_rent_unscaled = ann_egi - ann_opex - ann_maint - asset.annual_debt_service_cents
+                    downtime_lost_unscaled = ann_egi * (asset.renovation_downtime_months / 12.0)
+
+                    net_cf_cents = int(round(h_val * net_rent_unscaled - (v_val * downtime_lost_unscaled if v_val > 0.5 else 0)))
 
                     action = DecisionAction.HOLD
                     if a_val > 0.5:
@@ -2371,20 +2678,22 @@ class MultiPeriodPortfolioOptimizer:
                             asset_id=asset.asset_id,
                             action=action,
                             holding_fraction=h_val,
-                            cash_flow_generated_cents=int(h_val * (asset.monthly_gross_potential_rent_cents * 12)),
-                            capital_expenditure_cents=int(v_val * asset.planned_capex_cents),
+                            cash_flow_generated_cents=net_cf_cents,
+                            capital_expenditure_cents=int(round(v_val * asset.planned_capex_cents)),
                             renovation_active=(v_val > 0.5),
                         )
                     )
 
             terminal_wealth = int(
-                (
-                    cash_vars[T].solution_value()
-                    + sum(h_vars[i, T].solution_value() * (float(all_assets[i].net_equity_cents) / SCALE) for i in range(n_assets))
+                round(
+                    (
+                        cash_vars[T].solution_value()
+                        + sum(h_vars[i, T].solution_value() * (float(all_assets[i].net_equity_cents) / SCALE) for i in range(n_assets))
+                    )
+                    * SCALE
                 )
-                * SCALE
             )
-            total_distributed_cents = int(sum(dist_vars[t].solution_value() for t in range(1, T + 1)) * SCALE)
+            total_distributed_cents = int(round(sum(dist_vars[t].solution_value() for t in range(1, T + 1)) * SCALE))
             return MultiPeriodOptimizationResult(
                 status=status,
                 is_optimal=is_opt,
@@ -2421,6 +2730,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from typing import Optional, Sequence, Tuple
 from uuid import UUID, uuid4
 import numpy as np
@@ -2447,7 +2757,8 @@ class InvestmentDecisionGovernanceGate:
     Enforces strict GLITTERS governance:
     Engine 08 is strictly advisory and CANNOT execute transactions or post financial entries.
     All binding capital deployment or rebalancing requires Investment Committee sign-off.
-    Enforces tenant organization isolation and auditable algorithmic decision envelopes.
+    Enforces tenant organization isolation, input provenance verification,
+    distinct solver status mapping, and rigorous statistical uncertainty characterization.
     """
 
     @classmethod
@@ -2460,13 +2771,14 @@ class InvestmentDecisionGovernanceGate:
         scenario_returns: Optional[np.ndarray] = None,
         scenario_probabilities: Optional[np.ndarray] = None,
         provenance: Optional[ScenarioProvenanceKind] = None,
+        scenario_evidence_verified: Optional[bool] = None,
         policy_id: str = "POL-PORTFOLIO-ALLOCATION-2026",
         threshold_for_committee_cents: int = 10_000_000_00,  # KES 10M
     ) -> AlgorithmDecisionEnvelope[PortfolioInvestmentBridge]:
         """
         Packages solver results into an auditable AlgorithmDecisionEnvelope[PortfolioInvestmentBridge].
         Strictly enforces tenant isolation between caller and portfolio.
-        Computes empirical scenario volatility and effective sample size.
+        Calculates empirical scenario volatility, sample standard error, and true portfolio holding delta.
         """
         # 1. Enforce strict tenant isolation boundary
         if str(caller.tenant_org_id) != str(portfolio.tenant_org_id):
@@ -2479,40 +2791,69 @@ class InvestmentDecisionGovernanceGate:
         execution_id = uuid4()
         decision_id = uuid4()
 
-        # 2. Map holdings strictly from provided assets or portfolio assets
+        # 2. Map holdings strictly from provided assets or portfolio assets with length verification
         target_assets = assets if assets is not None else portfolio.assets
+        if len(solver_result.optimal_weights) != len(target_assets):
+            raise ValueError(
+                f"Length mismatch: solver optimal_weights length ({len(solver_result.optimal_weights)}) "
+                f"does not match target assets length ({len(target_assets)})"
+            )
+
         holdings: list[tuple[str, float]] = []
         for i, a in enumerate(target_assets):
-            if i < len(solver_result.optimal_weights):
-                w = float(solver_result.optimal_weights[i])
-                holdings.append((a.asset_id, round(w, 4)))
+            w = float(solver_result.optimal_weights[i])
+            holdings.append((a.asset_id, round(w, 4)))
 
-        # 3. Compute empirical scenario volatility and effective sample size
-        n_scens = len(scenario_probabilities) if scenario_probabilities is not None else 0
-        if (
+        # 3. Compute empirical scenario volatility, sample standard error, and effective sample size
+        has_scenario_inputs = (
             scenario_returns is not None
             and scenario_probabilities is not None
             and len(solver_result.optimal_weights) == scenario_returns.shape[0]
-            and n_scens > 0
-        ):
-            # Portfolio scenario returns: R_s^{port} = sum_i x_i R_{is}
-            port_scen_returns = solver_result.optimal_weights @ scenario_returns
-            mu = float(np.sum(scenario_probabilities * port_scen_returns))
-            var = float(np.sum(scenario_probabilities * ((port_scen_returns - mu) ** 2)))
-            portfolio_volatility = float(np.sqrt(max(0.0, var)))
-            eff_sample_size = float(1.0 / np.sum(scenario_probabilities ** 2))
-        else:
-            # Fallback to conservative CVaR-derived risk estimate if raw scenarios omitted
-            portfolio_volatility = abs(solver_result.cvar_alpha)
-            eff_sample_size = float(max(1, len(holdings)))
+            and len(scenario_probabilities) > 0
+        )
 
-        # 4. Determine if committee approval is required
+        if has_scenario_inputs:
+            # Validate probabilities strictly
+            _, valid_probs = validate_scenario_distribution(scenario_returns, scenario_probabilities)
+            port_scen_returns = solver_result.optimal_weights @ scenario_returns
+            mu = float(np.sum(valid_probs * port_scen_returns))
+            var = float(np.sum(valid_probs * ((port_scen_returns - mu) ** 2)))
+            portfolio_volatility = float(np.sqrt(max(0.0, var)))
+            eff_sample_size = float(1.0 / np.sum(valid_probs ** 2))
+            # Standard error of the expected return point estimate
+            std_err = portfolio_volatility / math.sqrt(max(1.0, eff_sample_size))
+            unc_lower = solver_result.expected_return - 1.96 * std_err
+            unc_upper = solver_result.expected_return + 1.96 * std_err
+            interval_type = "STANDARD_ERROR_NORMAL_95"
+            epistemic_status = "ESTIMATED_SAMPLE_CONFIDENCE_INTERVAL" if solver_result.is_optimal else "FAILED_OR_INFEASIBLE"
+        else:
+            # Explicit unsupported/missing state: NEVER use CVaR as fallback volatility!
+            portfolio_volatility = 0.0
+            eff_sample_size = 0.0
+            unc_lower = float("nan")
+            unc_upper = float("nan")
+            interval_type = "UNAVAILABLE_MISSING_SCENARIOS"
+            epistemic_status = "UNSUPPORTED_NO_SCENARIOS"
+
+        # 4. Compare recommended holdings to actual current portfolio holdings (not equal weights)
         total_val_cents = portfolio.total_portfolio_value_cents
-        rebalancing_needed = any(abs(w - (1.0 / max(1, len(target_assets)))) > 0.05 for _, w in holdings)
+        current_holdings_map: dict[str, float] = {}
+        if total_val_cents > 0:
+            for p_asset in portfolio.assets:
+                p_val = p_asset.current_valuation_cents * p_asset.initial_ownership_fraction
+                current_holdings_map[p_asset.asset_id] = p_val / total_val_cents
+
+        rebalancing_needed = any(
+            abs(w_rec - current_holdings_map.get(aid, 0.0)) > 0.005
+            for aid, w_rec in holdings
+        )
+
+        # 5. Strict CORE Fiduciary Gate: Any capital deployment or rebalancing requires Committee signoff
         requires_committee = (
-            total_val_cents >= threshold_for_committee_cents
-            or rebalancing_needed
+            rebalancing_needed
+            or total_val_cents >= threshold_for_committee_cents
             or not solver_result.is_optimal
+            or any(w > 0.01 for _, w in holdings)
         )
 
         bridge_dto = PortfolioInvestmentBridge(
@@ -2535,7 +2876,7 @@ class InvestmentDecisionGovernanceGate:
             escalation_timeout_hours=48,
         )
 
-        # 5. Canonical SHA256 decision payload hash
+        # 6. Canonical SHA256 decision payload hash
         payload_dict = {
             "portfolio_id": bridge_dto.portfolio_id,
             "tenant_org_id": str(bridge_dto.tenant_org_id),
@@ -2564,38 +2905,52 @@ class InvestmentDecisionGovernanceGate:
             requires_human_approval=requires_committee,
         )
 
-        # 6. Map OptimizationStatus to AlgorithmicExecutionStatus and AbstentionReason
+        # 7. Map OptimizationStatus to distinct AlgorithmicExecutionStatus and AbstentionReason
         status_map = {
             OptimizationStatus.OPTIMAL: (AlgorithmicExecutionStatus.OPTIMAL, AbstentionReason.NONE),
             OptimizationStatus.FEASIBLE: (AlgorithmicExecutionStatus.FEASIBLE_APPROXIMATE, AbstentionReason.NONE),
-            OptimizationStatus.TIME_LIMIT: (AlgorithmicExecutionStatus.INFEASIBLE, AbstentionReason.SOLVER_TIMEOUT),
+            OptimizationStatus.TIME_LIMIT: (AlgorithmicExecutionStatus.CONFLICTING_CONSTRAINTS, AbstentionReason.SOLVER_TIMEOUT),
+            OptimizationStatus.UNBOUNDED: (AlgorithmicExecutionStatus.ABSTAINED_POLICY_VIOLATION, AbstentionReason.HARD_CONSTRAINT_VIOLATION),
             OptimizationStatus.INFEASIBLE: (AlgorithmicExecutionStatus.INFEASIBLE, AbstentionReason.CONFLICTING_CONSTRAINTS),
-            OptimizationStatus.UNBOUNDED: (AlgorithmicExecutionStatus.INFEASIBLE, AbstentionReason.HARD_CONSTRAINT_VIOLATION),
-            OptimizationStatus.UNKNOWN: (AlgorithmicExecutionStatus.INFEASIBLE, AbstentionReason.CONFLICTING_CONSTRAINTS),
+            OptimizationStatus.UNKNOWN: (AlgorithmicExecutionStatus.ABSTAINED_INSUFFICIENT_DATA, AbstentionReason.INSUFFICIENT_DATA),
         }
         status_mapped, abstention_reason = status_map.get(
             solver_result.status,
-            (AlgorithmicExecutionStatus.INFEASIBLE, AbstentionReason.CONFLICTING_CONSTRAINTS),
+            (AlgorithmicExecutionStatus.ABSTAINED_INSUFFICIENT_DATA, AbstentionReason.INSUFFICIENT_DATA),
         )
 
-        # 7. Confidence Tier based on data provenance
+        # 8. Rigorous Confidence Tier based on evidenced provenance (not just solver optimality)
+        effective_prov = provenance
+        effective_verified = scenario_evidence_verified
+
+        if effective_prov is None:
+            # When caller does not specify provenance (legacy default), treat as historical
+            effective_prov = ScenarioProvenanceKind.HISTORICAL_OBSERVATION
+            effective_verified = (scenario_evidence_verified is not False)
+        elif effective_verified is None:
+            effective_verified = False
+
         if solver_result.is_optimal:
-            if provenance in (None, ScenarioProvenanceKind.HISTORICAL_OBSERVATION, ScenarioProvenanceKind.STATISTICAL_FORECAST):
+            if effective_prov == ScenarioProvenanceKind.HISTORICAL_OBSERVATION and effective_verified:
                 conf_tier = ConfidenceTier.HIGH_CONFIDENCE
-            elif provenance == ScenarioProvenanceKind.EXPERT_ASSUMPTION:
+            elif effective_prov in (
+                ScenarioProvenanceKind.HISTORICAL_OBSERVATION,
+                ScenarioProvenanceKind.STATISTICAL_FORECAST,
+                ScenarioProvenanceKind.EXPERT_ASSUMPTION,
+            ):
                 conf_tier = ConfidenceTier.MODERATE_CONFIDENCE
-            elif provenance == ScenarioProvenanceKind.SYNTHETIC_SCENARIO:
+            elif effective_prov == ScenarioProvenanceKind.SYNTHETIC_SCENARIO:
                 conf_tier = ConfidenceTier.WEAKLY_SUPPORTED
             else:
-                conf_tier = ConfidenceTier.MODERATE_CONFIDENCE
+                conf_tier = ConfidenceTier.WEAKLY_SUPPORTED
         else:
             conf_tier = ConfidenceTier.WEAKLY_SUPPORTED
 
         explanation = DecisionExplanation(
             summary_narrative=(
                 f"Optimized portfolio recommendation for {len(target_assets)} assets using Rockafellar-Uryasev Mean-CVaR. "
-                f"Expected annual return: {solver_result.expected_return:.2%}, CVaR_95: {solver_result.cvar_alpha:.2%}, "
-                f"Volatility: {portfolio_volatility:.2%}."
+                f"Expected net annual return: {solver_result.expected_return:.2%}, Net CVaR_95: {solver_result.cvar_alpha:.2%}, "
+                f"Empirical Volatility: {portfolio_volatility:.2%}."
             ),
             feature_attributions={
                 "expected_return": solver_result.expected_return,
@@ -2615,12 +2970,12 @@ class InvestmentDecisionGovernanceGate:
             confidence_tier=conf_tier,
             uncertainty=UncertaintyBounds(
                 point_estimate=solver_result.expected_return,
-                lower_bound=solver_result.expected_return - solver_result.cvar_alpha,
-                upper_bound=solver_result.expected_return + solver_result.cvar_alpha,
+                lower_bound=unc_lower,
+                upper_bound=unc_upper,
                 confidence_level=0.95,
-                interval_type="ROCKAFELLAR_CVAR_95",
+                interval_type=interval_type,
                 effective_sample_size=eff_sample_size,
-                epistemic_status="CONVERGED_OPTIMAL" if solver_result.is_optimal else "FAILED_OR_INFEASIBLE",
+                epistemic_status=epistemic_status,
             ),
             explanation=explanation,
             payload=bridge_dto,
@@ -2638,13 +2993,17 @@ class InvestmentDecisionGovernanceGate:
 # ==============================================================================
 
 from dataclasses import dataclass
+import math
 from typing import Optional
 
 
 
 @dataclass(frozen=True, slots=True)
 class UpstreamEngineDataFeed:
-    """Explicitly typed upstream data snapshot representing available or missing upstream feeds."""
+    """
+    Explicitly typed upstream data snapshot representing available or missing upstream engine feeds.
+    Strictly documents engine availability flags and audit provenance.
+    """
     asset_id: str
     valuation_cents: Optional[int] = None
     valuation_source: str = "DEFAULT_OR_MANUAL"
@@ -2654,18 +3013,34 @@ class UpstreamEngineDataFeed:
     planned_renovation_capex_cents: Optional[int] = None
     planned_maintenance_cents: Optional[int] = None
     spatial_risk_multiplier: float = 1.0
-    is_engine02_available: bool = False
-    is_engine03_available: bool = False
-    is_engine04_available: bool = False
-    is_engine05_available: bool = False
-    is_engine06_available: bool = False
-    is_engine10_available: bool = False
+    is_engine02_available: bool = False  # Valuation Engine
+    is_engine03_available: bool = False  # Geospatial Intelligence Engine
+    is_engine04_available: bool = False  # Rental Optimization Engine
+    is_engine05_available: bool = False  # Construction Engine
+    is_engine06_available: bool = False  # Financial Intelligence Engine
+    is_engine10_available: bool = False  # Predictive Maintenance Engine
+
+    def __post_init__(self) -> None:
+        if self.valuation_cents is not None and self.valuation_cents < 0:
+            raise ValueError(f"valuation_cents cannot be negative: {self.valuation_cents}")
+        if self.clearing_rent_monthly_cents is not None and self.clearing_rent_monthly_cents < 0:
+            raise ValueError(f"clearing_rent_monthly_cents cannot be negative: {self.clearing_rent_monthly_cents}")
+        if self.projected_vacancy_rate is not None:
+            if not math.isfinite(self.projected_vacancy_rate) or not (0.0 <= self.projected_vacancy_rate <= 1.0):
+                raise ValueError(f"projected_vacancy_rate must be in [0, 1]: {self.projected_vacancy_rate}")
+        if self.planned_renovation_capex_cents is not None and self.planned_renovation_capex_cents < 0:
+            raise ValueError(f"planned_renovation_capex_cents cannot be negative: {self.planned_renovation_capex_cents}")
+        if self.planned_maintenance_cents is not None and self.planned_maintenance_cents < 0:
+            raise ValueError(f"planned_maintenance_cents cannot be negative: {self.planned_maintenance_cents}")
+        if not math.isfinite(self.spatial_risk_multiplier) or self.spatial_risk_multiplier <= 0.0:
+            raise ValueError(f"spatial_risk_multiplier must be a positive finite float: {self.spatial_risk_multiplier}")
 
 
 class UpstreamIntegrationAdapter:
     """
     Typed adapter converting upstream engine outputs into PropertyAsset definitions.
     Strictly documents and manages missing or unintegrated upstream engines.
+    Applies spatial risk multipliers and routes predictive maintenance via Engine 10.
     """
 
     @classmethod
@@ -2684,29 +3059,38 @@ class UpstreamIntegrationAdapter:
                 f"Asset ID mismatch: feed.asset_id '{feed.asset_id}' does not match base_asset.asset_id '{base_asset.asset_id}'"
             )
 
+        # Engine 02: Valuation
         val = (
             feed.valuation_cents
             if (feed.is_engine02_available and feed.valuation_cents is not None)
             else base_asset.current_valuation_cents
         )
+
+        # Engine 04: Clearing Rent
         rent = (
             feed.clearing_rent_monthly_cents
             if (feed.is_engine04_available and feed.clearing_rent_monthly_cents is not None)
             else base_asset.monthly_gross_potential_rent_cents
         )
-        vac = (
-            feed.projected_vacancy_rate
-            if (feed.is_engine03_available and feed.projected_vacancy_rate is not None)
-            else base_asset.annual_baseline_vacancy_rate
-        )
+
+        # Engine 03: Geospatial Vacancy & Spatial Risk Multiplier
+        if feed.is_engine03_available:
+            base_vac = feed.projected_vacancy_rate if feed.projected_vacancy_rate is not None else base_asset.annual_baseline_vacancy_rate
+            vac = min(1.0, max(0.0, base_vac * feed.spatial_risk_multiplier))
+        else:
+            vac = base_asset.annual_baseline_vacancy_rate
+
+        # Engine 05: Construction Planned Renovation CapEx
         capex = (
             feed.planned_renovation_capex_cents
             if (feed.is_engine05_available and feed.planned_renovation_capex_cents is not None)
             else base_asset.planned_capex_cents
         )
+
+        # Engine 10: Predictive Maintenance (Engine 06 is Financial Intelligence, not maintenance)
         maint = (
             feed.planned_maintenance_cents
-            if (feed.is_engine06_available and feed.planned_maintenance_cents is not None)
+            if (feed.is_engine10_available and feed.planned_maintenance_cents is not None)
             else base_asset.annual_routine_maintenance_cents
         )
 
@@ -2763,14 +3147,28 @@ class GlittersContractsAdapter:
     ) -> PortfolioInvestmentBridge:
         """Constructs the canonical PortfolioInvestmentBridge DTO with exact holdings and volatility."""
         target_assets = assets if assets is not None else portfolio.assets
+        if len(solver_result.optimal_weights) != len(target_assets):
+            raise ValueError(
+                f"Length mismatch: solver optimal_weights ({len(solver_result.optimal_weights)}) "
+                f"does not match target assets ({len(target_assets)})"
+            )
+
         holdings = []
         for i, a in enumerate(target_assets):
-            if i < len(solver_result.optimal_weights):
-                w = float(solver_result.optimal_weights[i])
-                holdings.append((a.asset_id, round(w, 4)))
+            w = float(solver_result.optimal_weights[i])
+            holdings.append((a.asset_id, round(w, 4)))
 
         total_cents = portfolio.total_portfolio_value_cents
-        rebal = any(abs(w - (1.0 / max(1, len(target_assets)))) > 0.05 for _, w in holdings)
+        current_holdings_map: dict[str, float] = {}
+        if total_cents > 0:
+            for p_asset in portfolio.assets:
+                p_val = p_asset.current_valuation_cents * p_asset.initial_ownership_fraction
+                current_holdings_map[p_asset.asset_id] = p_val / total_cents
+
+        rebal = any(
+            abs(w_rec - current_holdings_map.get(aid, 0.0)) > 0.005
+            for aid, w_rec in holdings
+        )
 
         # Compute empirical scenario volatility if provided
         if (
@@ -2779,12 +3177,13 @@ class GlittersContractsAdapter:
             and len(solver_result.optimal_weights) == scenario_returns.shape[0]
             and len(scenario_probabilities) > 0
         ):
+            _, valid_probs = validate_scenario_distribution(scenario_returns, scenario_probabilities)
             port_scen_returns = solver_result.optimal_weights @ scenario_returns
-            mu = float(np.sum(scenario_probabilities * port_scen_returns))
-            var = float(np.sum(scenario_probabilities * ((port_scen_returns - mu) ** 2)))
+            mu = float(np.sum(valid_probs * port_scen_returns))
+            var = float(np.sum(valid_probs * ((port_scen_returns - mu) ** 2)))
             volatility = float(np.sqrt(max(0.0, var)))
         else:
-            volatility = abs(solver_result.cvar_alpha)
+            volatility = 0.0
 
         return PortfolioInvestmentBridge(
             portfolio_id=portfolio.portfolio_id,

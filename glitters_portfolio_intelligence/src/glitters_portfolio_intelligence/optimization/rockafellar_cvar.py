@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, Sequence, Tuple
 import numpy as np
 
 from ..domain.entities import PropertyAsset
 from ..domain.enums import OptimizationObjective, OptimizationStatus, SolverBackendType, UnsupportedSolverConfigurationError
+from ..scenarios.cvar_verifier import CVaREmpiricalVerifier
 from ..scenarios.validation import validate_scenario_distribution
 from .constraints import PortfolioConstraints, build_linear_constraint_matrices
 from .solver_backends import PortfolioSolverBackend, SolverExecutionResult
@@ -17,6 +18,15 @@ class RockafellarMeanCVaROptimizer:
     Solves for optimal portfolio weights x in [0, 1]^N, Value-at-Risk gamma,
     scenario excess loss variables u in R_+^S, optional turnover deviation variables,
     and optional binary selection variables for cardinality and minimum holding constraints.
+
+    Consistent Return and Risk Accounting Convention:
+      - All reported expected returns are NET of transaction costs:
+          E[R_net] = E[R_gross] - C_tx, where C_tx = sum_i (c_buy * delta_i^+ + c_sell * delta_i^-)
+      - Net scenario losses reflect deterministic transaction fees:
+          L_{s, net} = -sum_i x_i * r_{is} + C_tx
+      - Net CVaR represents the Conditional Value-at-Risk of the net loss distribution L_{s, net}.
+      - Both net expected return and net CVaR are independently recomputed from the final weights
+        using the discrete empirical CVaR verifier across all three objective modes.
     """
 
     @classmethod
@@ -99,12 +109,12 @@ class RockafellarMeanCVaROptimizer:
         c_sell = constraints.sell_transaction_cost_rate if has_turnover else 0.0
 
         if objective == OptimizationObjective.MINIMIZE_CVAR_TARGET_RETURN:
-            # Objective: gamma + 1/(1 - alpha) * sum p_s * u_s
+            # Objective: gamma + 1/(1 - alpha) * sum p_s * u_s (Minimize Net CVaR)
             c_obj[gamma_idx] = 1.0
             c_obj[u_idx_start : u_idx_start + n_scens] = scenario_probabilities / (1.0 - alpha)
 
         elif objective == OptimizationObjective.MAXIMIZE_RETURN_CVAR_BUDGET:
-            # Objective: -sum x_i * E[r_i] + sum (c_buy delta_i^+ + c_sell delta_i^-)
+            # Objective: -E[R_net] = -sum x_i * E[r_i] + sum (c_buy delta_i^+ + c_sell delta_i^-)
             c_obj[:n_assets] = -expected_returns
             if has_turnover:
                 for i in range(n_assets):
@@ -112,7 +122,7 @@ class RockafellarMeanCVaROptimizer:
                     c_obj[sell_idx_start + i] = c_sell
 
         elif objective == OptimizationObjective.SCALARIZED_RISK_RETURN:
-            # Objective: lambda * [gamma + 1/(1-alpha) sum p_s u_s] - (1 - lambda) * [sum x_i E[r_i] - tx_costs]
+            # Objective: lambda * Net_CVaR - (1 - lambda) * Net_E[R]
             c_obj[:n_assets] = -(1.0 - risk_aversion_lambda) * expected_returns
             c_obj[gamma_idx] = risk_aversion_lambda
             c_obj[u_idx_start : u_idx_start + n_scens] = (
@@ -174,11 +184,17 @@ class RockafellarMeanCVaROptimizer:
         ub_b: list[float] = []
         labels: list[str] = []
 
-        # 1. Rockafellar Scenario Loss Constraints: -sum_i x_i * r_{is} - gamma - u_s <= 0
+        # 1. Rockafellar Scenario Loss Constraints:
+        # L_{s, net} - gamma - u_s <= 0
+        # <=> -sum_i x_i * r_{is} + sum_i (c_buy delta_i^+ + c_sell delta_i^-) - gamma - u_s <= 0
         for s in range(n_scens):
             row = [0.0] * n_vars
             for i in range(n_assets):
                 row[i] = -float(scenario_returns[i, s])
+            if has_turnover:
+                for i in range(n_assets):
+                    row[buy_idx_start + i] = c_buy
+                    row[sell_idx_start + i] = c_sell
             row[gamma_idx] = -1.0
             row[u_idx_start + s] = -1.0
             ub_rows.append(row)
@@ -186,6 +202,8 @@ class RockafellarMeanCVaROptimizer:
             labels.append(f"Scenario loss upper bound s={s}")
 
         # 2. Target return constraint (if MINIMIZE_CVAR_TARGET_RETURN):
+        # -E[R_net] <= -target_return
+        # <=> -sum_i x_i * E[r_i] + sum_i (c_buy delta_i^+ + c_sell delta_i^-) <= -target_return
         if objective == OptimizationObjective.MINIMIZE_CVAR_TARGET_RETURN:
             if target_return is None:
                 target_return = float(np.mean(expected_returns))
@@ -201,6 +219,7 @@ class RockafellarMeanCVaROptimizer:
             labels.append(f"Target expected return >= {target_return:.4f}")
 
         # 3. CVaR Budget constraint (if MAXIMIZE_RETURN_CVAR_BUDGET):
+        # Net CVaR <= cvar_budget
         if objective == OptimizationObjective.MAXIMIZE_RETURN_CVAR_BUDGET:
             if cvar_budget is None:
                 cvar_budget = 0.15
@@ -269,7 +288,7 @@ class RockafellarMeanCVaROptimizer:
         A_ub = np.array(ub_rows, dtype=np.float64)
         b_ub = np.array(ub_b, dtype=np.float64)
 
-        return PortfolioSolverBackend.solve_linear_cvar(
+        raw_result = PortfolioSolverBackend.solve_linear_cvar(
             c_obj=c_obj,
             A_ub=A_ub,
             b_ub=b_ub,
@@ -285,4 +304,38 @@ class RockafellarMeanCVaROptimizer:
             constraint_labels=labels,
             backend=backend,
             time_limit_seconds=time_limit_seconds,
+        )
+
+        if not raw_result.is_optimal and raw_result.status != OptimizationStatus.FEASIBLE:
+            return raw_result
+
+        # Independent calculation of net expected return and empirical net CVaR/VaR
+        x_sol = raw_result.optimal_weights
+        gross_return = float(np.sum(x_sol * expected_returns))
+
+        if has_turnover and constraints.initial_weights is not None:
+            w0 = np.array(constraints.initial_weights, dtype=np.float64)
+            d_plus = np.maximum(0.0, x_sol - w0)
+            d_minus = np.maximum(0.0, w0 - x_sol)
+            tx_cost = float(np.sum(c_buy * d_plus + c_sell * d_minus))
+        else:
+            tx_cost = 0.0
+
+        net_return = gross_return - tx_cost
+
+        # Net scenario loss vector: L_{s, net} = - (x @ scenario_returns[:, s]) + tx_cost
+        port_scen_gross_ret = x_sol @ scenario_returns
+        port_scen_net_losses = -port_scen_gross_ret + tx_cost
+
+        cvar_diag = CVaREmpiricalVerifier.compute_empirical_cvar_from_losses(
+            scenario_losses=port_scen_net_losses,
+            scenario_probabilities=scenario_probabilities,
+            alpha=alpha,
+        )
+
+        return replace(
+            raw_result,
+            expected_return=net_return,
+            cvar_alpha=cvar_diag.cvar_alpha,
+            var_alpha=cvar_diag.var_alpha,
         )

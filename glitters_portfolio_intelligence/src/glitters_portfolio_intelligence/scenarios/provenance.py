@@ -11,6 +11,7 @@ class ScenarioDefinition:
     """
     Rigorously tracked scenario definition ensuring full provenance transparency.
     Forbids mislabeling arbitrary shocks as verified historical facts.
+    Requires verified dataset identifier and SHA256 evidence artifact for historical scenarios.
     """
     scenario_id: str
     name: str
@@ -44,3 +45,31 @@ class ScenarioDefinition:
         elif self.provenance == ScenarioProvenanceKind.SYNTHETIC_SCENARIO:
             if "actual historical" in self.source.lower():
                 raise ValueError("SYNTHETIC_SCENARIO cannot claim actual historical source")
+
+    @property
+    def has_verified_historical_evidence(self) -> bool:
+        """
+        True only if this is a HISTORICAL_OBSERVATION scenario with both a declared
+        dataset identifier and a valid 64-character SHA256 evidence artifact.
+        """
+        return bool(
+            self.provenance == ScenarioProvenanceKind.HISTORICAL_OBSERVATION
+            and self.dataset_identifier
+            and self.dataset_sha256
+            and len(self.dataset_sha256) == 64
+        )
+
+    def reclassify_if_unverified(self) -> ScenarioDefinition:
+        """
+        Where source evidence (dataset_identifier and valid dataset_sha256) is unavailable,
+        reclassifies the scenario as EXPERT_ASSUMPTION so unverified scenarios do not
+        claim historical validation while preserving the original assumptions and methodology.
+        """
+        if self.provenance == ScenarioProvenanceKind.HISTORICAL_OBSERVATION and not self.has_verified_historical_evidence:
+            from dataclasses import replace
+            return replace(
+                self,
+                provenance=ScenarioProvenanceKind.EXPERT_ASSUMPTION,
+                transformation_methodology=f"{self.transformation_methodology} (Reclassified: unverified historical evidence)",
+            )
+        return self
