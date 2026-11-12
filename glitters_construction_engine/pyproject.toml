@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glitters-construction-engine"
+version = "2.0.0"
+description = "Mathematically rigorous construction operations research, BOQ, RCPSP, procurement, and risk optimization engine for GLITTERS."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Proprietary - GLITTERS Engineering"}
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+]
+
+[project.optional-dependencies]
+cpsat = ["ortools>=9.6"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["glitters_construction_engine*"]
