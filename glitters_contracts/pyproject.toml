@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "glitters-contracts"
-version = "1.0.0"
-description = "Universal Execution, Decision, and Cross-Engine Interoperability Contracts for GLITTERS Algorithmic Platform"
+version = "1.1.0"
+description = "Universal Execution, Decision, and Cross-Engine Interoperability Contracts for GLITTERS Algorithmic Platform (v1.1.0)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Proprietary - GLITTERS Algorithmic Platform"}
@@ -14,6 +14,7 @@ authors = [
 ]
 dependencies = [
     "numpy>=1.24.0",
+    "pydantic>=2.0.0",
 ]
 
 [tool.setuptools.packages.find]

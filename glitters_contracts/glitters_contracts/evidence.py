@@ -86,3 +86,37 @@ class SettledPaymentEvidence:
             and self.amount_minor_units > 0
             and len(self.posting_hash_sha256) == 64
         )
+
+
+@dataclass(frozen=True, slots=True)
+class TenantCreditEvidence:
+    """Cryptographic evidence from licensed credit reference bureau (CRB)."""
+    applicant_id: str
+    crb_listing_status: str
+    crb_score: int
+    report_reference: str
+    verified_at_utc: datetime
+    crb_provider_hash_sha256: str
+
+    def verify(self) -> bool:
+        if not self.crb_provider_hash_sha256 or len(self.crb_provider_hash_sha256) != 64:
+            return False
+        return bool(self.applicant_id and self.report_reference and 0 <= self.crb_score <= 1000)
+
+
+@dataclass(frozen=True, slots=True)
+class TitleDeedEvidence:
+    """Official Ministry of Lands / Cadastral registry search evidence."""
+    title_number: str
+    registry_name: str
+    registered_owner_hash: str
+    encumbrances_search_reference: str
+    verified_at_utc: datetime
+    search_certificate_sha256: str
+
+    def verify(self) -> bool:
+        if not self.search_certificate_sha256 or len(self.search_certificate_sha256) != 64:
+            return False
+        if not self.registered_owner_hash or len(self.registered_owner_hash) != 64:
+            return False
+        return bool(self.title_number and self.encumbrances_search_reference)

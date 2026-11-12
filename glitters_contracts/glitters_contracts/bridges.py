@@ -71,3 +71,63 @@ class ConstructionProcurementFinancialBridge:
     item_category: str
     boraqs_certified: bool
     evidence_document_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class TenantRiskHandoffBridge:
+    """Standardized bridge DTO: Engine 07 -> Engine 01 & Engine 04."""
+    applicant_id: str
+    application_id: str
+    tenant_org_id: str
+    risk_score: float
+    risk_tier: str
+    default_probability_12m: float
+    recommended_max_rent_cents: int
+    recommended_deposit_months: int
+    is_eligible: bool
+    requires_human_review: bool
+    adverse_factors: tuple[str, ...]
+    scoring_timestamp_utc: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioInvestmentBridge:
+    """Standardized bridge DTO: Engine 08 -> GLITTERS CORE & Engine 02."""
+    portfolio_id: str
+    tenant_org_id: str
+    recommended_holdings: tuple[tuple[str, float], ...]
+    expected_annual_return: float
+    portfolio_cvar_95: float
+    portfolio_volatility: float
+    total_capital_deployed_cents: int
+    rebalancing_required: bool
+    requires_investment_committee_approval: bool
+    generated_at_utc: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RecommendationCandidateHandoffBridge:
+    """Standardized bridge DTO: Engine 09 -> Engine 01."""
+    applicant_id: str
+    property_id: str
+    utility_score: float
+    rank: int
+    affordability_ratio: float
+    preference_match_tier: str
+    explanation_summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class PredictiveMaintenanceHandoffBridge:
+    """Standardized bridge DTO: Engine 10 -> Engine 05 & Engine 08."""
+    asset_id: str
+    component_id: str
+    component_type: str
+    current_health_index: float
+    failure_probability_30d: float
+    estimated_remaining_useful_life_days: int
+    estimated_repair_cost_cents: int
+    maintenance_urgency: str
+    recommended_work_order_type: str
+    requires_immediate_dispatch: bool
+    assessed_at_utc: datetime

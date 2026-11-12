@@ -3,17 +3,54 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Distribution / packaging
+# Distribution / packaging / build directories
 dist/
 build/
 *.egg-info/
 .eggs/
+*.so
 
-# Environments
+# Virtual environments
 .venv/
 venv/
 ENV/
 env/
+.env/
+
+# Environment and secret configuration files
+.env
+.env.*
+!.env.example
+*.secret
+secrets.*
+credentials.json
+
+# Private signing keys and certificates
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+*.id_rsa
+*.id_ed25519
+
+# Private databases
+*.sqlite
+*.sqlite3
+*.db
+
+# Temporary files and caches
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Datasets generated during testing
 *.csv
