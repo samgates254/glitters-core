@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glitters-financial-intelligence"
+version = "1.0.0"
+description = "GLITTERS Financial Intelligence & Computational Accounting Engine: Exact Integer Minor-Unit Representation, Double-Entry Ledger, Fellegi-Sunter Bayesian Reconciliation, Waterfall Allocation, and Graph Anomaly Detection."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Proprietary - GLITTERS Algorithmic Platform"}
+authors = [
+    {name = "GLITTERS Computational Accounting & Financial Optimization Engineering"}
+]
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "pandas>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "mypy>=1.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["glitters_financial_intelligence*"]
