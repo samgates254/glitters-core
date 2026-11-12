@@ -1,0 +1,122 @@
+[
+  {
+    "scenario": "Small Portfolio (50 U x 100 A) - Hungarian",
+    "units": 50,
+    "applicants": 100,
+    "regime": "HUNGARIAN_ASSIGNMENT",
+    "allocated_count": 50,
+    "execution_time_ms": 198.03,
+    "peak_memory_kb": 1941.0,
+    "status": "OPTIMAL",
+    "is_proven_optimal": true,
+    "jain_fairness_bps": 9990
+  },
+  {
+    "scenario": "Small Portfolio (50 U x 100 A) - MinCostMaxFlow",
+    "units": 50,
+    "applicants": 100,
+    "regime": "MIN_COST_MAX_FLOW",
+    "allocated_count": 50,
+    "execution_time_ms": 185.46,
+    "peak_memory_kb": 1701.0,
+    "status": "OPTIMAL",
+    "is_proven_optimal": true,
+    "jain_fairness_bps": 9989
+  },
+  {
+    "scenario": "Small Portfolio (50 U x 100 A) - MILP HiGHS",
+    "units": 50,
+    "applicants": 100,
+    "regime": "MILP_HIGHS",
+    "allocated_count": 50,
+    "execution_time_ms": 12706.71,
+    "peak_memory_kb": 2084.8,
+    "status": "OPTIMAL",
+    "is_proven_optimal": true,
+    "jain_fairness_bps": 9990
+  },
+  {
+    "scenario": "Small Portfolio (50 U x 100 A) - CP-SAT Exact",
+    "units": 50,
+    "applicants": 100,
+    "regime": "CPSAT_EXACT",
+    "allocated_count": 50,
+    "execution_time_ms": 295.21,
+    "peak_memory_kb": 2261.0,
+    "status": "OPTIMAL",
+    "is_proven_optimal": true,
+    "jain_fairness_bps": 9990
+  },
+  {
+    "scenario": "Small Portfolio (50 U x 100 A) - Lexicographic CP-SAT",
+    "units": 50,
+    "applicants": 100,
+    "regime": "LEXICOGRAPHIC_CPSAT",
+    "allocated_count": 50,
+    "execution_time_ms": 589.86,
+    "peak_memory_kb": 2275.8,
+    "status": "OPTIMAL",
+    "is_proven_optimal": true,
+    "jain_fairness_bps": 9991
+  },
+  {
+    "scenario": "Medium Portfolio (250 U x 500 A) - MinCostMaxFlow",
+    "units": 250,
+    "applicants": 500,
+    "regime": "MIN_COST_MAX_FLOW",
+    "allocated_count": 250,
+    "execution_time_ms": 3049.6,
+    "peak_memory_kb": 24198.6,
+    "status": "OPTIMAL",
+    "is_proven_optimal": true,
+    "jain_fairness_bps": 9993
+  },
+  {
+    "scenario": "Medium Portfolio (250 U x 500 A) - CP-SAT Side-Constrained",
+    "units": 250,
+    "applicants": 500,
+    "regime": "CPSAT_EXACT",
+    "allocated_count": 250,
+    "execution_time_ms": 5059.32,
+    "peak_memory_kb": 25451.1,
+    "status": "OPTIMAL",
+    "is_proven_optimal": true,
+    "jain_fairness_bps": 9992
+  },
+  {
+    "scenario": "Large Portfolio (1,000 U x 1,000 A) - MinCostMaxFlow",
+    "units": 1000,
+    "applicants": 1000,
+    "regime": "MIN_COST_MAX_FLOW",
+    "allocated_count": 1000,
+    "execution_time_ms": 17720.87,
+    "peak_memory_kb": 136095.4,
+    "status": "OPTIMAL",
+    "is_proven_optimal": true,
+    "jain_fairness_bps": 9989
+  },
+  {
+    "scenario": "High Contention (1 U x 2,000 A) - MinCostMaxFlow",
+    "units": 1,
+    "applicants": 2000,
+    "regime": "MIN_COST_MAX_FLOW",
+    "allocated_count": 1,
+    "execution_time_ms": 325.65,
+    "peak_memory_kb": 2184.2,
+    "status": "OPTIMAL",
+    "is_proven_optimal": true,
+    "jain_fairness_bps": 10000
+  },
+  {
+    "scenario": "Enterprise Scale (2,000 U x 2,000 A) - MinCostMaxFlow",
+    "units": 2000,
+    "applicants": 2000,
+    "regime": "MIN_COST_MAX_FLOW",
+    "allocated_count": 2000,
+    "execution_time_ms": 36930.6,
+    "peak_memory_kb": 287751.9,
+    "status": "OPTIMAL",
+    "is_proven_optimal": true,
+    "jain_fairness_bps": 9988
+  }
+]
