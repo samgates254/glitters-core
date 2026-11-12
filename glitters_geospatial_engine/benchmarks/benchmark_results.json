@@ -1,0 +1,85 @@
+{
+  "spatial_indexing_benchmarks": {
+    "n_parcels": 10000,
+    "n_queries": 200,
+    "indexes": {
+      "STRtree_RTree": {
+        "build_time_ms": 2.355,
+        "avg_query_latency_ms": 0.0041,
+        "peak_memory_kb": 78.66,
+        "total_hits": 997
+      },
+      "cKDTree_2D": {
+        "build_time_ms": 1.963,
+        "avg_query_latency_ms": 0.0079,
+        "peak_memory_kb": 79.79,
+        "total_hits": 989
+      },
+      "Planar_Quadtree": {
+        "build_time_ms": 211.335,
+        "avg_query_latency_ms": 0.0127,
+        "peak_memory_kb": 3238.17,
+        "total_hits": 997
+      },
+      "BRIN_Unclustered": {
+        "avg_query_latency_ms": 0.3174,
+        "avg_blocks_scanned_per_query": 78.86,
+        "total_blocks": 79
+      },
+      "BRIN_Hilbert_Clustered": {
+        "avg_query_latency_ms": 0.0192,
+        "avg_blocks_scanned_per_query": 4.21,
+        "total_blocks": 79,
+        "block_scan_reduction_pct": 94.65
+      }
+    },
+    "grid_encoding_10k_points_ms": {
+      "GlittersHexGrid_Res9_ms": 29.48,
+      "GlittersHilbertGrid_Level16_ms": 58.64,
+      "Geohash_Base32_Len8_ms": 31.37
+    },
+    "sparse_local_morans_i_5000_points": {
+      "execution_time_ms": 5.64,
+      "sparse_nnz_entries": 31040,
+      "dense_matrix_equivalent_entries": 25000000,
+      "memory_sparsity_reduction_pct": 99.88
+    }
+  },
+  "raster_and_remote_sensing_benchmarks": {
+    "tile_dimensions": "1024x1024 (1,048,576 pixels, 2% NoData masked)",
+    "ndvi_valid_pixel_ratio": 0.98,
+    "ndvi_with_jacobian_uncertainty_ms": 176.66,
+    "ndvi_throughput_mpixels_per_sec": 5.94,
+    "evi_with_jacobian_uncertainty_ms": 83.67,
+    "bsi_with_jacobian_uncertainty_ms": 54.37,
+    "dem_256x256_full_hydrology_pipeline_ms": 311.25
+  },
+  "network_routing_benchmarks": {
+    "graph_nodes": 400,
+    "ch_precomputation_ms": 943.05,
+    "ch_shortcuts_added": 21408,
+    "dijkstra_avg_ms": 0.3357,
+    "astar_avg_ms": 0.38,
+    "contraction_hierarchy_query_avg_ms": 0.1072,
+    "dijkstra_avg_visited_nodes": 371.0,
+    "astar_avg_visited_nodes": 329.4,
+    "mssp_all_400_nodes_to_8_facilities_ms": 0.459
+  },
+  "scientific_validation_benchmarks": {
+    "benchmark_scope": "SYNTHETIC_VECTORIZATION_AND_UNCERTAINTY_STRESS_TEST (Not a claim of trained model accuracy on real satellite imagery)",
+    "building_vectorization_stress_test_20_gt": {
+      "precision": 0.9,
+      "recall": 0.9,
+      "f1": 0.9,
+      "mean_tp_iou": 0.9926,
+      "tp": 18,
+      "fp": 2,
+      "fn": 2
+    },
+    "area_uncertainty_validation_1500m2_parcel": {
+      "analytical_sigma_m2": 8.746,
+      "monte_carlo_1000_runs_sigma_m2": 8.753,
+      "analytical_95ci_halfwidth_m2": 17.143
+    }
+  }
+}

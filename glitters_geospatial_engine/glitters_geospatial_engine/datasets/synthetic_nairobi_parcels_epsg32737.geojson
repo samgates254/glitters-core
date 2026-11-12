@@ -1,0 +1,1026 @@
+{
+  "type": "FeatureCollection",
+  "name": "Synthetic_Nairobi_Parcel_Fabric_EPSG32737",
+  "crs": {
+    "type": "name",
+    "properties": {
+      "name": "urn:ogc:def:crs:EPSG::32737"
+    }
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00001",
+      "properties": {
+        "parcel_id": "SYN_NRB_00001",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257530.0,
+              9857000.0
+            ],
+            [
+              257530.0,
+              9857050.0
+            ],
+            [
+              257500.0,
+              9857050.0
+            ],
+            [
+              257500.0,
+              9857000.0
+            ],
+            [
+              257530.0,
+              9857000.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00002",
+      "properties": {
+        "parcel_id": "SYN_NRB_00002",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257557.5,
+              9857000.0
+            ],
+            [
+              257557.5,
+              9857050.0
+            ],
+            [
+              257527.5,
+              9857050.0
+            ],
+            [
+              257527.5,
+              9857000.0
+            ],
+            [
+              257557.5,
+              9857000.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00003",
+      "properties": {
+        "parcel_id": "SYN_NRB_00003",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257590.0,
+              9857000.0
+            ],
+            [
+              257590.0,
+              9857050.0
+            ],
+            [
+              257560.0,
+              9857050.0
+            ],
+            [
+              257560.0,
+              9857000.0
+            ],
+            [
+              257590.0,
+              9857000.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00004",
+      "properties": {
+        "parcel_id": "SYN_NRB_00004",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257620.0,
+              9857000.0
+            ],
+            [
+              257620.0,
+              9857050.0
+            ],
+            [
+              257590.8,
+              9857050.0
+            ],
+            [
+              257590.8,
+              9857000.0
+            ],
+            [
+              257620.0,
+              9857000.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00005",
+      "properties": {
+        "parcel_id": "SYN_NRB_00005",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257650.0,
+              9857000.0
+            ],
+            [
+              257650.0,
+              9857050.0
+            ],
+            [
+              257620.0,
+              9857050.0
+            ],
+            [
+              257620.0,
+              9857000.0
+            ],
+            [
+              257650.0,
+              9857000.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00006",
+      "properties": {
+        "parcel_id": "SYN_NRB_00006",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257530.0,
+              9857050.0
+            ],
+            [
+              257530.0,
+              9857100.0
+            ],
+            [
+              257500.0,
+              9857100.0
+            ],
+            [
+              257500.0,
+              9857050.0
+            ],
+            [
+              257530.0,
+              9857050.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00007",
+      "properties": {
+        "parcel_id": "SYN_NRB_00007",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257560.0,
+              9857050.0
+            ],
+            [
+              257560.0,
+              9857100.0
+            ],
+            [
+              257530.0,
+              9857100.0
+            ],
+            [
+              257530.0,
+              9857050.0
+            ],
+            [
+              257560.0,
+              9857050.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00008",
+      "properties": {
+        "parcel_id": "SYN_NRB_00008",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257590.0,
+              9857050.0
+            ],
+            [
+              257590.0,
+              9857100.0
+            ],
+            [
+              257560.0,
+              9857100.0
+            ],
+            [
+              257560.0,
+              9857050.0
+            ],
+            [
+              257590.0,
+              9857050.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00009",
+      "properties": {
+        "parcel_id": "SYN_NRB_00009",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257620.0,
+              9857050.0
+            ],
+            [
+              257620.0,
+              9857100.0
+            ],
+            [
+              257590.0,
+              9857100.0
+            ],
+            [
+              257590.0,
+              9857050.0
+            ],
+            [
+              257620.0,
+              9857050.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00010",
+      "properties": {
+        "parcel_id": "SYN_NRB_00010",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257650.0,
+              9857050.0
+            ],
+            [
+              257650.0,
+              9857100.0
+            ],
+            [
+              257620.0,
+              9857100.0
+            ],
+            [
+              257620.0,
+              9857050.0
+            ],
+            [
+              257650.0,
+              9857050.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00011",
+      "properties": {
+        "parcel_id": "SYN_NRB_00011",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257530.0,
+              9857112.0
+            ],
+            [
+              257530.0,
+              9857162.0
+            ],
+            [
+              257500.0,
+              9857162.0
+            ],
+            [
+              257500.0,
+              9857112.0
+            ],
+            [
+              257530.0,
+              9857112.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00012",
+      "properties": {
+        "parcel_id": "SYN_NRB_00012",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257560.0,
+              9857112.0
+            ],
+            [
+              257560.0,
+              9857162.0
+            ],
+            [
+              257530.0,
+              9857162.0
+            ],
+            [
+              257530.0,
+              9857112.0
+            ],
+            [
+              257560.0,
+              9857112.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00013",
+      "properties": {
+        "parcel_id": "SYN_NRB_00013",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257590.0,
+              9857112.0
+            ],
+            [
+              257590.0,
+              9857162.0
+            ],
+            [
+              257560.0,
+              9857162.0
+            ],
+            [
+              257560.0,
+              9857112.0
+            ],
+            [
+              257590.0,
+              9857112.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00014",
+      "properties": {
+        "parcel_id": "SYN_NRB_00014",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257620.0,
+              9857112.0
+            ],
+            [
+              257620.0,
+              9857162.0
+            ],
+            [
+              257590.0,
+              9857162.0
+            ],
+            [
+              257590.0,
+              9857112.0
+            ],
+            [
+              257620.0,
+              9857112.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00015",
+      "properties": {
+        "parcel_id": "SYN_NRB_00015",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257650.0,
+              9857112.0
+            ],
+            [
+              257650.0,
+              9857162.0
+            ],
+            [
+              257620.0,
+              9857162.0
+            ],
+            [
+              257620.0,
+              9857112.0
+            ],
+            [
+              257650.0,
+              9857112.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00016",
+      "properties": {
+        "parcel_id": "SYN_NRB_00016",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257530.0,
+              9857162.0
+            ],
+            [
+              257530.0,
+              9857212.0
+            ],
+            [
+              257500.0,
+              9857212.0
+            ],
+            [
+              257500.0,
+              9857162.0
+            ],
+            [
+              257530.0,
+              9857162.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00017",
+      "properties": {
+        "parcel_id": "SYN_NRB_00017",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257560.0,
+              9857162.0
+            ],
+            [
+              257560.0,
+              9857212.0
+            ],
+            [
+              257530.0,
+              9857212.0
+            ],
+            [
+              257530.0,
+              9857162.0
+            ],
+            [
+              257560.0,
+              9857162.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00018",
+      "properties": {
+        "parcel_id": "SYN_NRB_00018",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257590.0,
+              9857162.0
+            ],
+            [
+              257590.0,
+              9857212.0
+            ],
+            [
+              257560.0,
+              9857212.0
+            ],
+            [
+              257560.0,
+              9857162.0
+            ],
+            [
+              257590.0,
+              9857162.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00019",
+      "properties": {
+        "parcel_id": "SYN_NRB_00019",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257620.0,
+              9857162.0
+            ],
+            [
+              257620.0,
+              9857212.0
+            ],
+            [
+              257590.0,
+              9857212.0
+            ],
+            [
+              257590.0,
+              9857162.0
+            ],
+            [
+              257620.0,
+              9857162.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00020",
+      "properties": {
+        "parcel_id": "SYN_NRB_00020",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257650.0,
+              9857162.0
+            ],
+            [
+              257650.0,
+              9857212.0
+            ],
+            [
+              257620.0,
+              9857212.0
+            ],
+            [
+              257620.0,
+              9857162.0
+            ],
+            [
+              257650.0,
+              9857162.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00021",
+      "properties": {
+        "parcel_id": "SYN_NRB_00021",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257530.0,
+              9857224.0
+            ],
+            [
+              257530.0,
+              9857274.0
+            ],
+            [
+              257500.0,
+              9857274.0
+            ],
+            [
+              257500.0,
+              9857224.0
+            ],
+            [
+              257530.0,
+              9857224.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00022",
+      "properties": {
+        "parcel_id": "SYN_NRB_00022",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257560.0,
+              9857224.0
+            ],
+            [
+              257560.0,
+              9857274.0
+            ],
+            [
+              257530.0,
+              9857274.0
+            ],
+            [
+              257530.0,
+              9857224.0
+            ],
+            [
+              257560.0,
+              9857224.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00023",
+      "properties": {
+        "parcel_id": "SYN_NRB_00023",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257590.0,
+              9857224.0
+            ],
+            [
+              257590.0,
+              9857274.0
+            ],
+            [
+              257560.0,
+              9857274.0
+            ],
+            [
+              257560.0,
+              9857224.0
+            ],
+            [
+              257590.0,
+              9857224.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00024",
+      "properties": {
+        "parcel_id": "SYN_NRB_00024",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257620.0,
+              9857224.0
+            ],
+            [
+              257620.0,
+              9857274.0
+            ],
+            [
+              257590.0,
+              9857274.0
+            ],
+            [
+              257590.0,
+              9857224.0
+            ],
+            [
+              257620.0,
+              9857224.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_00025",
+      "properties": {
+        "parcel_id": "SYN_NRB_00025",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": 1500.0
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257650.0,
+              9857224.0
+            ],
+            [
+              257650.0,
+              9857274.0
+            ],
+            [
+              257620.0,
+              9857274.0
+            ],
+            [
+              257620.0,
+              9857224.0
+            ],
+            [
+              257650.0,
+              9857224.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "SYN_NRB_DUP_00005",
+      "properties": {
+        "parcel_id": "SYN_NRB_DUP_00005",
+        "utm_epsg": 32737,
+        "observation_date": "2026-01-15",
+        "authority": "INFERRED_GEOMETRIC_BOUNDARY",
+        "is_legally_verified_cadastre": false,
+        "stated_deed_area_m2": null
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              257650.08,
+              9857000.05
+            ],
+            [
+              257650.08,
+              9857050.05
+            ],
+            [
+              257620.08,
+              9857050.05
+            ],
+            [
+              257620.08,
+              9857000.05
+            ],
+            [
+              257650.08,
+              9857000.05
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}
