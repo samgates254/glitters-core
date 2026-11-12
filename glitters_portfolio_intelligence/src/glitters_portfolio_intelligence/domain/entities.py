@@ -34,6 +34,7 @@ class PropertyAsset:
     renovation_downtime_months: int = 3
     liquidity_discount_rate: float = 0.05
     minimum_holding_months: int = 12
+    initial_ownership_fraction: float = 1.0
 
     def __post_init__(self) -> None:
         if self.acquisition_valuation_cents < 0:
@@ -48,6 +49,8 @@ class PropertyAsset:
             raise ValueError(f"current_loan_balance_cents must be >= 0: {self.current_loan_balance_cents}")
         if self.annual_debt_service_cents < 0:
             raise ValueError(f"annual_debt_service_cents must be >= 0: {self.annual_debt_service_cents}")
+        if not (0.0 <= self.initial_ownership_fraction <= 1.0):
+            raise ValueError(f"initial_ownership_fraction must be in [0, 1]: {self.initial_ownership_fraction}")
 
     @property
     def current_ltv(self) -> float:

@@ -39,12 +39,41 @@ class UpstreamIntegrationAdapter:
         base_asset: PropertyAsset,
         feed: UpstreamEngineDataFeed,
     ) -> PropertyAsset:
-        """Applies available upstream estimates to refine asset investment state."""
-        val = feed.valuation_cents if feed.valuation_cents is not None else base_asset.current_valuation_cents
-        rent = feed.clearing_rent_monthly_cents if feed.clearing_rent_monthly_cents is not None else base_asset.monthly_gross_potential_rent_cents
-        vac = feed.projected_vacancy_rate if feed.projected_vacancy_rate is not None else base_asset.annual_baseline_vacancy_rate
-        capex = feed.planned_renovation_capex_cents if feed.planned_renovation_capex_cents is not None else base_asset.planned_capex_cents
-        maint = feed.planned_maintenance_cents if feed.planned_maintenance_cents is not None else base_asset.annual_routine_maintenance_cents
+        """
+        Applies available upstream estimates to refine asset investment state.
+        Strictly rejects feeds where asset_id does not match base_asset.
+        Respects availability flags; unflagged feeds fall back safely to base asset values.
+        """
+        if feed.asset_id != base_asset.asset_id:
+            raise ValueError(
+                f"Asset ID mismatch: feed.asset_id '{feed.asset_id}' does not match base_asset.asset_id '{base_asset.asset_id}'"
+            )
+
+        val = (
+            feed.valuation_cents
+            if (feed.is_engine02_available and feed.valuation_cents is not None)
+            else base_asset.current_valuation_cents
+        )
+        rent = (
+            feed.clearing_rent_monthly_cents
+            if (feed.is_engine04_available and feed.clearing_rent_monthly_cents is not None)
+            else base_asset.monthly_gross_potential_rent_cents
+        )
+        vac = (
+            feed.projected_vacancy_rate
+            if (feed.is_engine03_available and feed.projected_vacancy_rate is not None)
+            else base_asset.annual_baseline_vacancy_rate
+        )
+        capex = (
+            feed.planned_renovation_capex_cents
+            if (feed.is_engine05_available and feed.planned_renovation_capex_cents is not None)
+            else base_asset.planned_capex_cents
+        )
+        maint = (
+            feed.planned_maintenance_cents
+            if (feed.is_engine06_available and feed.planned_maintenance_cents is not None)
+            else base_asset.annual_routine_maintenance_cents
+        )
 
         return PropertyAsset(
             asset_id=base_asset.asset_id,
@@ -66,4 +95,5 @@ class UpstreamIntegrationAdapter:
             renovation_downtime_months=base_asset.renovation_downtime_months,
             liquidity_discount_rate=base_asset.liquidity_discount_rate,
             minimum_holding_months=base_asset.minimum_holding_months,
+            initial_ownership_fraction=base_asset.initial_ownership_fraction,
         )

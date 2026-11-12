@@ -74,10 +74,13 @@ def compute_asset_annual_cashflow(
     v = asset.annual_baseline_vacancy_rate if vacancy_rate is None else vacancy_rate
     c = asset.annual_baseline_credit_loss_rate if credit_loss_rate is None else credit_loss_rate
 
+    v_dec = Decimal(str(v))
+    c_dec = Decimal(str(c))
+
     gpr = asset.monthly_gross_potential_rent_cents * 12
-    vac_loss = int(Decimal(str(gpr * v)).quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
+    vac_loss = int((Decimal(gpr) * v_dec).quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
     billed_rent = gpr - vac_loss
-    credit_loss = int(Decimal(str(billed_rent * c)).quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
+    credit_loss = int((Decimal(billed_rent) * c_dec).quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
     egi = gpr - vac_loss - credit_loss + other_income_cents
 
     opex = asset.monthly_operating_expense_cents * 12

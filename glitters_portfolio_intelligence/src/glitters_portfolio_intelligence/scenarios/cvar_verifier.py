@@ -6,6 +6,8 @@ from typing import Sequence, Tuple
 import numpy as np
 from scipy.optimize import minimize_scalar
 
+from .validation import validate_scenario_distribution
+
 
 @dataclass(frozen=True, slots=True)
 class CVaRVerificationResult:
@@ -33,6 +35,9 @@ def compute_rockafellar_cvar_1d(
     Computes exact discrete CVaR_alpha according to Rockafellar & Uryasev (2000):
       CVaR_alpha = min_eta [ eta + 1/(1 - alpha) * sum_{s=1}^S p_s * max(L_s - eta, 0) ]
 
+    Strictly applies canonical probability distribution validation:
+    Forbids silent probability normalization.
+
     Correctly handles:
       - Repeated scenario losses (ties/atoms).
       - Probability mass exactly at VaR.
@@ -41,22 +46,19 @@ def compute_rockafellar_cvar_1d(
       - Zero-loss scenarios.
       - Any confidence level alpha in (0, 1).
     """
-    if not (0.0 < alpha < 1.0):
-        raise ValueError(f"alpha must be in (0, 1), got {alpha}")
-    if len(losses) != len(probabilities):
-        raise ValueError(f"losses ({len(losses)}) and probabilities ({len(probabilities)}) length mismatch")
-    if len(losses) == 0:
-        raise ValueError("Scenario vectors cannot be empty")
+    loss_arr = np.asarray(losses, dtype=np.float64)
+    if loss_arr.ndim != 1 or len(loss_arr) == 0:
+        raise ValueError("losses must be a non-empty 1D array")
+    if not np.all(np.isfinite(loss_arr)):
+        raise ValueError("losses must contain only finite numbers")
 
-    total_prob = sum(probabilities)
-    if not math.isclose(total_prob, 1.0, rel_tol=1e-5, abs_tol=1e-5):
-        # Normalize probabilities
-        norm_p = [p / total_prob for p in probabilities]
-    else:
-        norm_p = list(probabilities)
-
-    loss_arr = np.array(losses, dtype=np.float64)
-    prob_arr = np.array(norm_p, dtype=np.float64)
+    # Canonical validation (passing loss_arr as 1 x S pseudo-returns)
+    _, prob_arr = validate_scenario_distribution(
+        scenario_returns=loss_arr.reshape((1, -1)),
+        scenario_probabilities=probabilities,
+        alpha=alpha,
+        tolerance=tolerance,
+    )
 
     def phi(eta: float) -> float:
         """The Rockafellar-Uryasev auxiliary function F_alpha(eta)."""
@@ -78,11 +80,9 @@ def compute_rockafellar_cvar_1d(
     var_continuous = float(opt_res.x)
 
     # 3. Exact fractional tail mass calculation at VaR
-    # Losses > var
     tail_mask = loss_arr > (var_breakpoint + 1e-12)
     p_tail = float(np.sum(prob_arr[tail_mask]))
 
-    # Losses == var
     atom_mask = np.abs(loss_arr - var_breakpoint) <= 1e-12
     p_atom = float(np.sum(prob_arr[atom_mask]))
 
@@ -92,7 +92,6 @@ def compute_rockafellar_cvar_1d(
     discrepancy = abs(cvar_breakpoint - cvar_continuous)
     is_verified = discrepancy <= tolerance or math.isclose(cvar_breakpoint, cvar_continuous, rel_tol=1e-4)
 
-    # Return the verified minimum
     cvar_final = min(cvar_breakpoint, cvar_continuous)
     var_final = var_breakpoint if abs(cvar_breakpoint - cvar_final) < 1e-7 else var_continuous
 

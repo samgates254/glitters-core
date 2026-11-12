@@ -22,6 +22,8 @@ class ScenarioDefinition:
     transformation_methodology: str
     assumptions: Mapping[str, float] = field(default_factory=dict)
     asset_returns: Mapping[str, float] = field(default_factory=dict)  # asset_id -> annual return
+    dataset_identifier: Optional[str] = None
+    dataset_sha256: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.probability <= 1.0):
@@ -30,6 +32,10 @@ class ScenarioDefinition:
             raise ValueError("Scenario ID and name cannot be empty")
         if not self.source:
             raise ValueError("Scenario source must be explicitly declared for auditability")
+
+        if self.dataset_sha256 is not None:
+            if len(self.dataset_sha256) != 64 or not all(c in "0123456789abcdefABCDEF" for c in self.dataset_sha256):
+                raise ValueError(f"dataset_sha256 must be a valid 64-character hex string: {self.dataset_sha256}")
 
         # Provenance integrity validation
         if self.provenance == ScenarioProvenanceKind.HISTORICAL_OBSERVATION:

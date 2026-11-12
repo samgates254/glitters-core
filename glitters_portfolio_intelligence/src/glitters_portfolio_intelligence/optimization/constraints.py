@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from ..domain.entities import PropertyAsset
 from ..domain.enums import AssetCategory, GeographicSubmarket
+from ..cashflows.accounting import compute_asset_annual_cashflow
 
 
 @dataclass(frozen=True, slots=True)
 class PortfolioConstraints:
     """
     Comprehensive portfolio linear and mixed-integer constraints.
-    All financial thresholds in integer KES cents or exact ratios.
+    Validates all parameters strictly; no declared constraint is silently ignored.
     """
     min_cash_reserve_weight: float = 0.05
     max_single_asset_weight: float = 0.35
@@ -21,12 +23,64 @@ class PortfolioConstraints:
     max_capex_budget_cents: Optional[int] = None
     max_geographic_weights: Mapping[GeographicSubmarket, float] = field(default_factory=dict)
     max_category_weights: Mapping[AssetCategory, float] = field(default_factory=dict)
-    initial_weights: Optional[Sequence[float]] = None
+    initial_weights: Optional[Tuple[float, ...]] = None
     max_turnover_rate: Optional[float] = None
     buy_transaction_cost_rate: float = 0.06
     sell_transaction_cost_rate: float = 0.04
-    min_holding_weight: float = 0.0  # Threshold for binary cardinality activation
-    max_cardinality: Optional[int] = None  # Max number of non-zero assets (requires MILP)
+    min_holding_weight: float = 0.0
+    max_cardinality: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.min_cash_reserve_weight < 1.0):
+            raise ValueError(f"min_cash_reserve_weight must be in [0, 1), got {self.min_cash_reserve_weight}")
+        if not (0.0 < self.max_single_asset_weight <= 1.0):
+            raise ValueError(f"max_single_asset_weight must be in (0, 1], got {self.max_single_asset_weight}")
+        if self.max_portfolio_ltv < 0.0:
+            raise ValueError(f"max_portfolio_ltv cannot be negative: {self.max_portfolio_ltv}")
+        if self.min_portfolio_dscr < 0.0:
+            raise ValueError(f"min_portfolio_dscr cannot be negative: {self.min_portfolio_dscr}")
+        if self.max_capex_budget_cents is not None and self.max_capex_budget_cents < 0:
+            raise ValueError(f"max_capex_budget_cents cannot be negative: {self.max_capex_budget_cents}")
+        if not (0.0 <= self.buy_transaction_cost_rate <= 1.0):
+            raise ValueError(f"buy_transaction_cost_rate must be in [0, 1]: {self.buy_transaction_cost_rate}")
+        if not (0.0 <= self.sell_transaction_cost_rate <= 1.0):
+            raise ValueError(f"sell_transaction_cost_rate must be in [0, 1]: {self.sell_transaction_cost_rate}")
+        if not (0.0 <= self.min_holding_weight <= self.max_single_asset_weight):
+            raise ValueError(
+                f"min_holding_weight ({self.min_holding_weight}) must be in [0, max_single_asset_weight ({self.max_single_asset_weight})]"
+            )
+        if self.max_cardinality is not None and self.max_cardinality < 1:
+            raise ValueError(f"max_cardinality must be >= 1, got {self.max_cardinality}")
+
+        if self.max_turnover_rate is not None:
+            if self.max_turnover_rate < 0.0:
+                raise ValueError(f"max_turnover_rate cannot be negative: {self.max_turnover_rate}")
+            if self.initial_weights is None:
+                raise ValueError("max_turnover_rate requires initial_weights to be specified")
+
+        if self.initial_weights is not None:
+            if not self.initial_weights:
+                raise ValueError("initial_weights cannot be empty when provided")
+            for w in self.initial_weights:
+                if not math.isfinite(w) or w < 0.0:
+                    raise ValueError(f"Initial weight must be finite and >= 0, got {w}")
+            sum_w = sum(self.initial_weights)
+            if sum_w > 1.0 + 1e-4:
+                raise ValueError(f"Sum of initial weights cannot exceed 1.0, got {sum_w:.4f}")
+
+    @property
+    def requires_milp(self) -> bool:
+        """Returns True if constraints require integer/binary decision variables."""
+        return (self.max_cardinality is not None) or (self.min_holding_weight > 0.0)
+
+    @property
+    def requires_turnover_variables(self) -> bool:
+        """Returns True if buy/sell turnover variables are required."""
+        return (self.initial_weights is not None) and (
+            self.max_turnover_rate is not None
+            or self.buy_transaction_cost_rate > 0.0
+            or self.sell_transaction_cost_rate > 0.0
+        )
 
 
 def build_linear_constraint_matrices(
@@ -36,6 +90,7 @@ def build_linear_constraint_matrices(
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """
     Builds the linear inequality constraint matrix A_ub @ x <= b_ub for portfolio weights x.
+    Uses exact cash-flow accounting for DSCR consistency.
 
     Returns:
       A_ub: 2D array of constraint coefficients (n_constraints, n_assets)
@@ -62,19 +117,13 @@ def build_linear_constraint_matrices(
     labels.append(f"Portfolio LTV <= {constraints.max_portfolio_ltv:.2f}")
 
     # 3. Minimum portfolio DSCR: sum_i x_i * (DSCR_min * Debt_i - NOI_i) <= 0
-    # Equivalent to: sum_i x_i * NOI_i >= DSCR_min * sum_i x_i * Debt_i
+    # Uses exact compute_asset_annual_cashflow to guarantee 100% consistency with accounting statements
     dscr_min = constraints.min_portfolio_dscr
     dscr_coeffs = []
     for a in assets:
-        ann_gpr = a.monthly_gross_potential_rent_cents * 12
-        vac = int(ann_gpr * a.annual_baseline_vacancy_rate)
-        cred = int((ann_gpr - vac) * a.annual_baseline_credit_loss_rate)
-        egi = ann_gpr - vac - cred
-        opex = a.monthly_operating_expense_cents * 12
-        maint = a.annual_routine_maintenance_cents
-        noi = egi - opex - maint
-        debt = a.annual_debt_service_cents
-        # We want: sum x_i * (dscr_min * debt - noi) <= 0
+        stmt = compute_asset_annual_cashflow(a)
+        noi = stmt.net_operating_income_cents
+        debt = stmt.debt_service_cents
         dscr_coeffs.append(float(dscr_min * debt - noi) / 100.0)
     rows.append(dscr_coeffs)
     b_vals.append(0.0)

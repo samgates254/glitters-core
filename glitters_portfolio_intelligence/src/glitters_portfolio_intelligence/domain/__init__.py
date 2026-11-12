@@ -10,6 +10,7 @@ from .enums import (
     OptimizationStatus,
     ScenarioProvenanceKind,
     IRRStatus,
+    UnsupportedSolverConfigurationError,
 )
 from .money import Money, allocate_cents
 from .entities import PropertyAsset, Portfolio
@@ -24,6 +25,7 @@ __all__ = [
     "OptimizationStatus",
     "ScenarioProvenanceKind",
     "IRRStatus",
+    "UnsupportedSolverConfigurationError",
     "Money",
     "allocate_cents",
     "PropertyAsset",

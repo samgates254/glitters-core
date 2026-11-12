@@ -9,6 +9,7 @@ from glitters_portfolio_intelligence.domain.enums import (
     GeographicSubmarket,
     OptimizationObjective,
     SolverBackendType,
+    UnsupportedSolverConfigurationError,
 )
 from glitters_portfolio_intelligence.optimization.constraints import PortfolioConstraints
 from glitters_portfolio_intelligence.optimization.rockafellar_cvar import RockafellarMeanCVaROptimizer
@@ -69,7 +70,7 @@ def run_solver_benchmarks():
     )
 
     for n in asset_counts:
-        print(f"\n--- Testing with N = {n} Assets, S = 9 Scenarios ---")
+        print(f"\n--- LP Benchmark: N = {n} Assets, S = 9 Scenarios ---")
         portfolio = generate_synthetic_benchmark_portfolio(n)
         ret_matrix, probs, _ = ScenarioStressEngine.evaluate_portfolio_scenario_returns(portfolio)
 
@@ -98,6 +99,45 @@ def run_solver_benchmarks():
                 f"CVaR_95: {res.cvar_alpha:6.2%} | "
                 f"Avg Time: {avg_time_ms:6.2f} ms"
             )
+
+    # Mixed-Integer Linear Programming (MILP) Benchmark
+    print("\n" + "=" * 75)
+    print("--- MILP Cardinality & Min Holding Benchmark: N = 20 Assets, K_max = 5 ---")
+    print("=" * 75)
+
+    milp_constraints = PortfolioConstraints(
+        min_cash_reserve_weight=0.05,
+        max_single_asset_weight=0.35,
+        min_holding_weight=0.08,
+        max_cardinality=5,
+    )
+    portfolio_milp = generate_synthetic_benchmark_portfolio(20)
+    ret_m, probs_m, _ = ScenarioStressEngine.evaluate_portfolio_scenario_returns(portfolio_milp)
+
+    for b in backends:
+        t0 = time.perf_counter()
+        try:
+            res_milp = RockafellarMeanCVaROptimizer.optimize(
+                assets=portfolio_milp,
+                scenario_returns=ret_m,
+                scenario_probabilities=probs_m,
+                constraints=milp_constraints,
+                objective=OptimizationObjective.SCALARIZED_RISK_RETURN,
+                alpha=0.95,
+                risk_aversion_lambda=0.50,
+                backend=b,
+            )
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            active_assets = int(np.sum(res_milp.optimal_weights > 1e-4))
+            print(
+                f"  [{b.value:14s}] Status: {res_milp.status.value:7s} | "
+                f"Optimal: {str(res_milp.is_optimal):5s} | "
+                f"Held Assets: {active_assets}/5 | "
+                f"E[R]: {res_milp.expected_return:6.2%} | "
+                f"Time: {elapsed_ms:6.2f} ms"
+            )
+        except UnsupportedSolverConfigurationError as e:
+            print(f"  [{b.value:14s}] Correctly Rejected (LP-Only backend): {type(e).__name__}")
 
 
 if __name__ == "__main__":

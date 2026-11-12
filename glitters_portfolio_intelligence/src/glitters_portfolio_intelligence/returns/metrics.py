@@ -58,17 +58,25 @@ def compute_irr(
     max_iter: int = 100,
 ) -> IRRResult:
     """
-    Calculates Internal Rate of Return with rigorous Descartes' sign rule checks
-    and multi-root detection across r in [-0.90, 10.0].
+    Calculates Internal Rate of Return with Descartes' sign rule checks
+    and multi-root detection across r in [-0.89, 5.0].
+
+    Note on Search Limitations:
+      - This algorithm performs a fine-grid bracket search over r in [-0.89, 5.0].
+      - Roots lying strictly outside this search interval (e.g., r < -0.89 or r > 5.0) will not be detected.
+      - Tangent roots where NPV(r) touches zero without crossing (NPV'(r) = 0) do not produce sign changes
+        and will not be detected by interval bracketing.
+      - Absence of roots within this interval is reported as NO_ROOT_IN_SEARCH_INTERVAL and should not
+        be interpreted as a mathematical proof that no root exists globally.
     """
     if len(cash_flows_cents) < 2:
-        return IRRResult(rate=None, status=IRRStatus.NO_REAL_ROOT, iterations=0, npv_residual=0.0)
+        return IRRResult(rate=None, status=IRRStatus.NO_ROOT_IN_SEARCH_INTERVAL, iterations=0, npv_residual=0.0)
 
     # Filter out initial zeros
     cf_list = [cf for cf in cash_flows_cents]
     non_zero = [c for c in cf_list if c != 0]
     if not non_zero:
-        return IRRResult(rate=None, status=IRRStatus.NO_REAL_ROOT, iterations=0, npv_residual=0.0)
+        return IRRResult(rate=None, status=IRRStatus.NO_ROOT_IN_SEARCH_INTERVAL, iterations=0, npv_residual=0.0)
 
     # Count sign changes (Descartes' rule of signs)
     signs = [math.copysign(1, c) for c in non_zero]
@@ -80,7 +88,7 @@ def compute_irr(
         else:
             return IRRResult(rate=None, status=IRRStatus.ALL_NEGATIVE_CASHFLOWS, iterations=0, npv_residual=0.0)
 
-    # Grid search for sign changes in NPV(r) over [-0.90, 5.0]
+    # Grid search for sign changes in NPV(r) over [-0.89, 5.0]
     grid = np.linspace(-0.89, 5.0, 300)
     npv_vals = [compute_npv(r, cf_list) for r in grid]
 
@@ -92,7 +100,7 @@ def compute_irr(
             bracket_intervals.append((grid[i], grid[i + 1]))
 
     if not bracket_intervals:
-        return IRRResult(rate=None, status=IRRStatus.NO_REAL_ROOT, iterations=len(grid), npv_residual=npv_vals[-1])
+        return IRRResult(rate=None, status=IRRStatus.NO_ROOT_IN_SEARCH_INTERVAL, iterations=len(grid), npv_residual=npv_vals[-1])
 
     found_roots: list[float] = []
     for a, b in bracket_intervals:
@@ -141,7 +149,7 @@ def compute_irr(
             roots_found=(root,),
         )
 
-    return IRRResult(rate=None, status=IRRStatus.NO_REAL_ROOT, iterations=len(grid), npv_residual=0.0)
+    return IRRResult(rate=None, status=IRRStatus.NO_ROOT_IN_SEARCH_INTERVAL, iterations=len(grid), npv_residual=0.0)
 
 
 def compute_equity_multiple(

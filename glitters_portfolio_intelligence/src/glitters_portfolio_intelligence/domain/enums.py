@@ -76,7 +76,12 @@ class ScenarioProvenanceKind(str, Enum):
 class IRRStatus(str, Enum):
     """Diagnostic status for multi-period IRR numerical root finding."""
     CONVERGED = "CONVERGED"
-    NO_REAL_ROOT = "NO_REAL_ROOT"
+    NO_ROOT_IN_SEARCH_INTERVAL = "NO_ROOT_IN_SEARCH_INTERVAL"
     MULTIPLE_ROOTS_DETECTED = "MULTIPLE_ROOTS_DETECTED"
     ALL_POSITIVE_CASHFLOWS = "ALL_POSITIVE_CASHFLOWS"
     ALL_NEGATIVE_CASHFLOWS = "ALL_NEGATIVE_CASHFLOWS"
+
+
+class UnsupportedSolverConfigurationError(Exception):
+    """Raised when an LP solver backend is requested to solve a MILP or unsupported formulation."""
+    pass

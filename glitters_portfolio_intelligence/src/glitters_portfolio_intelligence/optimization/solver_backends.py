@@ -6,7 +6,7 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 from scipy.optimize import linprog
 
-from ..domain.enums import OptimizationStatus, SolverBackendType
+from ..domain.enums import OptimizationStatus, SolverBackendType, UnsupportedSolverConfigurationError
 
 try:
     import ortools
@@ -71,13 +71,14 @@ class PortfolioSolverBackend:
         alpha: float,
         scenario_returns: np.ndarray,
         scenario_probs: np.ndarray,
+        var_types: Optional[Sequence[str]] = None,
         constraint_labels: Sequence[str] | None = None,
         backend: SolverBackendType = SolverBackendType.HIGHS_SCIPY,
         time_limit_seconds: float = 30.0,
     ) -> SolverExecutionResult:
         """
-        Solves the LP formulation using the selected backend.
-        Variable layout: [x_1..x_N, gamma, u_1..u_S]
+        Solves the LP/MILP formulation using the selected backend.
+        Variable layout: [x_1..x_N, gamma, u_1..u_S, ...]
         """
         start_t = time.perf_counter()
 
@@ -94,6 +95,7 @@ class PortfolioSolverBackend:
                 alpha=alpha,
                 scenario_returns=scenario_returns,
                 scenario_probs=scenario_probs,
+                var_types=var_types,
                 constraint_labels=constraint_labels,
                 start_t=start_t,
                 time_limit_seconds=time_limit_seconds,
@@ -112,6 +114,7 @@ class PortfolioSolverBackend:
                 alpha=alpha,
                 scenario_returns=scenario_returns,
                 scenario_probs=scenario_probs,
+                var_types=var_types,
                 constraint_labels=constraint_labels,
                 start_t=start_t,
                 time_limit_seconds=time_limit_seconds,
@@ -131,10 +134,17 @@ class PortfolioSolverBackend:
         alpha: float,
         scenario_returns: np.ndarray,
         scenario_probs: np.ndarray,
+        var_types: Optional[Sequence[str]],
         constraint_labels: Sequence[str] | None,
         start_t: float,
         time_limit_seconds: float,
     ) -> SolverExecutionResult:
+        if var_types and any(vt in ("B", "I") for vt in var_types):
+            raise UnsupportedSolverConfigurationError(
+                "SciPy HiGHS backend in PortfolioSolverBackend does not support Mixed-Integer Linear Programming (MILP). "
+                "For cardinality or semi-continuous minimum holding constraints, use SCIP_ORTOOLS, HIGHS_ORTOOLS, or CBC_ORTOOLS."
+            )
+
         res = linprog(
             c=c_obj,
             A_ub=A_ub if len(A_ub) > 0 else None,
@@ -222,12 +232,19 @@ class PortfolioSolverBackend:
         alpha: float,
         scenario_returns: np.ndarray,
         scenario_probs: np.ndarray,
+        var_types: Optional[Sequence[str]],
         constraint_labels: Sequence[str] | None,
         start_t: float,
         time_limit_seconds: float,
     ) -> SolverExecutionResult:
         if not ORTOOLS_AVAILABLE:
             raise RuntimeError("Google OR-Tools is not installed.")
+
+        if backend == SolverBackendType.GLOP_ORTOOLS and var_types and any(vt in ("B", "I") for vt in var_types):
+            raise UnsupportedSolverConfigurationError(
+                "GLOP solver backend does not support Mixed-Integer Linear Programming (MILP). "
+                "For cardinality or semi-continuous minimum holding constraints, use SCIP_ORTOOLS, HIGHS_ORTOOLS, or CBC_ORTOOLS."
+            )
 
         ortools_name = {
             SolverBackendType.HIGHS_ORTOOLS: "HIGHS",
@@ -247,7 +264,13 @@ class PortfolioSolverBackend:
         for i in range(n_vars):
             lb = bounds[i][0] if bounds[i][0] is not None else -solver.infinity()
             ub = bounds[i][1] if bounds[i][1] is not None else solver.infinity()
-            vars_list.append(solver.NumVar(lb, ub, f"v_{i}"))
+            vt = var_types[i] if var_types and i < len(var_types) else "C"
+            if vt == "B":
+                vars_list.append(solver.BoolVar(f"v_{i}"))
+            elif vt == "I":
+                vars_list.append(solver.IntVar(lb, ub, f"v_{i}"))
+            else:
+                vars_list.append(solver.NumVar(lb, ub, f"v_{i}"))
 
         # Objective
         obj = solver.Objective()
@@ -286,6 +309,7 @@ class PortfolioSolverBackend:
         }
         status = status_map.get(solver_status, OptimizationStatus.UNKNOWN)
         is_opt = (status == OptimizationStatus.OPTIMAL)
+        ortools_ver = ortools.__version__ if ortools is not None else "unknown"
 
         if is_opt or status == OptimizationStatus.FEASIBLE:
             sol_x = np.array([v.solution_value() for v in vars_list], dtype=np.float64)
@@ -295,7 +319,15 @@ class PortfolioSolverBackend:
             cvar = float(gamma + (1.0 / (1.0 - alpha)) * np.sum(scenario_probs * u_excess))
             exp_ret = float(np.sum(x_weights * np.sum(scenario_returns * scenario_probs, axis=1)))
 
-            ortools_ver = ortools.__version__ if ortools is not None else "unknown"
+            gap = 0.0
+            if not is_opt:
+                try:
+                    bb = float(solver.Objective().BestBound())
+                    val = float(solver.Objective().Value())
+                    gap = abs(val - bb) / (abs(val) + 1e-10)
+                except Exception:
+                    gap = float("nan")
+
             return SolverExecutionResult(
                 solver_type=backend,
                 solver_version=f"OR-Tools {ortools_ver} ({ortools_name})",
@@ -306,14 +338,14 @@ class PortfolioSolverBackend:
                 cvar_alpha=cvar,
                 var_alpha=gamma,
                 objective_value=float(solver.Objective().Value()),
-                optimality_gap=0.0 if is_opt else 1e-4,
+                optimality_gap=gap,
                 solve_time_seconds=elapsed,
                 solver_specific_message=f"OR-Tools status code: {solver_status}",
             )
         else:
             return SolverExecutionResult(
                 solver_type=backend,
-                solver_version=f"OR-Tools {pywraplp.__version__} ({ortools_name})",
+                solver_version=f"OR-Tools {ortools_ver} ({ortools_name})",
                 status=status,
                 is_optimal=False,
                 optimal_weights=np.zeros(n_assets, dtype=np.float64),

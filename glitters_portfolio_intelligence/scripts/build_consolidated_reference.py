@@ -8,6 +8,7 @@ ORDERED_MODULES = [
     "src/glitters_portfolio_intelligence/domain/entities.py",
     "src/glitters_portfolio_intelligence/cashflows/accounting.py",
     "src/glitters_portfolio_intelligence/returns/metrics.py",
+    "src/glitters_portfolio_intelligence/scenarios/validation.py",
     "src/glitters_portfolio_intelligence/scenarios/provenance.py",
     "src/glitters_portfolio_intelligence/scenarios/cvar_verifier.py",
     "src/glitters_portfolio_intelligence/scenarios/stress_engine.py",
@@ -66,7 +67,7 @@ def generate_consolidated(base_dir: str, out_path: str) -> None:
 
         parts.append('')
 
-    content = '\n'.join(parts) + '\n'
+    content = '\n'.join(parts).rstrip() + '\n'
     with open(out_path, "w", encoding="utf-8") as fp:
         fp.write(content)
     print(f"Generated standalone reference at: {out_path} ({len(content)} bytes)")
