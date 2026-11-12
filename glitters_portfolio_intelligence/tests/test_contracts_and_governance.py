@@ -88,7 +88,8 @@ class TestContractsAndGovernance(unittest.TestCase):
         self.assertEqual(envelope.contract_version, ContractVersion.V1_1)
         self.assertIsInstance(envelope.payload, PortfolioInvestmentBridge)
         self.assertEqual(envelope.payload.portfolio_id, "PORT-KE-001")
-        self.assertEqual(envelope.confidence_tier, ConfidenceTier.HIGH_CONFIDENCE)
+        # In R1.2: Omitted provenance defaults to EXPERT_ASSUMPTION -> MODERATE_CONFIDENCE
+        self.assertEqual(envelope.confidence_tier, ConfidenceTier.MODERATE_CONFIDENCE)
 
         # Human Approval Requirement enforced
         self.assertTrue(envelope.requires_human_approval)

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Mapping, Sequence
 import numpy as np
 
 from ..domain.entities import Portfolio, PropertyAsset
 from ..domain.enums import AssetCategory, GeographicSubmarket, ScenarioProvenanceKind
-from .provenance import ScenarioDefinition
+from .provenance import ScenarioDefinition, EvidenceArtifactRegistry, default_evidence_registry
+from .validation import validate_scenario_distribution
 
 
 class ScenarioStressEngine:
@@ -175,21 +177,40 @@ class ScenarioStressEngine:
         cls,
         assets: Sequence[PropertyAsset],
         scenarios: Sequence[ScenarioDefinition] | None = None,
+        registry: EvidenceArtifactRegistry | None = None,
     ) -> tuple[np.ndarray, np.ndarray, list[ScenarioDefinition]]:
         """
         Computes the asset return matrix across scenarios:
           return_matrix[i, s]: Annual return of asset i under scenario s
           probability_vector[s]: Probability of scenario s
 
+        Enforces:
+          - Reclassifies unverified historical scenarios before evaluation.
+          - Rejects invalid scenario distributions without silent probability normalization.
+          - Validates exact matrix dimensions matching asset sequence.
         Returns: (return_matrix, probability_vector, scenarios)
         """
-        scen_list = list(scenarios) if scenarios is not None else cls.get_canonical_scenarios()
+        raw_scens = list(scenarios) if scenarios is not None else cls.get_canonical_scenarios()
+        if len(raw_scens) == 0:
+            raise ValueError("Scenario list cannot be empty")
+        # Downgrade unauthenticated historical claims before return evaluation and optimization
+        scen_list = [s.reclassify_if_unverified(registry) for s in raw_scens]
+
         n_assets = len(assets)
         n_scens = len(scen_list)
+        if n_assets == 0:
+            raise ValueError("Asset sequence cannot be empty")
 
-        probs = np.array([s.probability for s in scen_list], dtype=np.float64)
-        probs = probs / np.sum(probs)  # Ensure exact sum to 1.0
+        raw_probs = np.array([s.probability for s in scen_list], dtype=np.float64)
+        if not np.all(np.isfinite(raw_probs)):
+            raise ValueError("Scenario probabilities must be finite")
+        if np.any(raw_probs < 0.0):
+            raise ValueError("Scenario probabilities cannot be negative")
+        total_p = float(np.sum(raw_probs))
+        if total_p <= 0.0 or not math.isclose(total_p, 1.0, rel_tol=1e-4, abs_tol=1e-4):
+            raise ValueError(f"Scenario probabilities must sum to 1.0, got sum {total_p:.6f}")
 
+        probs = raw_probs
         return_matrix = np.zeros((n_assets, n_scens), dtype=np.float64)
 
         for s_idx, scen in enumerate(scen_list):
@@ -245,5 +266,8 @@ class ScenarioStressEngine:
 
                 total_ret = income_yield + appreciation
                 return_matrix[a_idx, s_idx] = float(total_ret)
+
+        if return_matrix.shape[0] != n_assets:
+            raise ValueError(f"return_matrix row count ({return_matrix.shape[0]}) does not match asset count ({n_assets})")
 
         return return_matrix, probs, scen_list

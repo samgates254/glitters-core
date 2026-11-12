@@ -60,7 +60,23 @@ class RockafellarMeanCVaROptimizer:
             scenario_returns, scenario_probabilities, alpha=alpha
         )
 
+        import math
+        if not math.isfinite(alpha) or not (0.0 < alpha < 1.0):
+            raise ValueError(f"alpha must be a finite float in (0, 1), got {alpha}")
+        if not math.isfinite(risk_aversion_lambda) or not (0.0 <= risk_aversion_lambda <= 1.0):
+            raise ValueError(f"risk_aversion_lambda must be a finite float in [0, 1], got {risk_aversion_lambda}")
+        if target_return is not None and not math.isfinite(target_return):
+            raise ValueError(f"target_return must be a finite float when provided, got {target_return}")
+        if cvar_budget is not None and not math.isfinite(cvar_budget):
+            raise ValueError(f"cvar_budget must be a finite float when provided, got {cvar_budget}")
+        if not math.isfinite(time_limit_seconds) or time_limit_seconds <= 0.0:
+            raise ValueError(f"time_limit_seconds must be a finite positive float, got {time_limit_seconds}")
+
         n_assets = len(assets)
+        if scenario_returns.shape[0] != n_assets:
+            raise ValueError(
+                f"scenario_returns row count ({scenario_returns.shape[0]}) does not match asset count ({n_assets})"
+            )
         n_scens = len(scenario_probabilities)
 
         if constraints.initial_weights is not None:
@@ -133,6 +149,19 @@ class RockafellarMeanCVaROptimizer:
                     c_obj[buy_idx_start + i] = (1.0 - risk_aversion_lambda) * c_buy
                     c_obj[sell_idx_start + i] = (1.0 - risk_aversion_lambda) * c_sell
 
+        elif objective == OptimizationObjective.EPSILON_CONSTRAINT:
+            if cvar_budget is None:
+                raise ValueError("OptimizationObjective.EPSILON_CONSTRAINT requires explicit finite cvar_budget parameter.")
+            # Objective: -E[R_net] = -sum x_i * E[r_i] + sum (c_buy delta_i^+ + c_sell delta_i^-)
+            c_obj[:n_assets] = -expected_returns
+            if has_turnover:
+                for i in range(n_assets):
+                    c_obj[buy_idx_start + i] = c_buy
+                    c_obj[sell_idx_start + i] = c_sell
+
+        else:
+            raise UnsupportedSolverConfigurationError(f"Unsupported optimization objective: {objective}")
+
         # Variable Bounds:
         bounds: list[Tuple[Optional[float], Optional[float]]] = []
         for _ in range(n_assets):
@@ -201,12 +230,10 @@ class RockafellarMeanCVaROptimizer:
             ub_b.append(0.0)
             labels.append(f"Scenario loss upper bound s={s}")
 
-        # 2. Target return constraint (if MINIMIZE_CVAR_TARGET_RETURN):
+        # 2. Target return constraint (if MINIMIZE_CVAR_TARGET_RETURN and target_return is provided):
         # -E[R_net] <= -target_return
         # <=> -sum_i x_i * E[r_i] + sum_i (c_buy delta_i^+ + c_sell delta_i^-) <= -target_return
-        if objective == OptimizationObjective.MINIMIZE_CVAR_TARGET_RETURN:
-            if target_return is None:
-                target_return = float(np.mean(expected_returns))
+        if objective == OptimizationObjective.MINIMIZE_CVAR_TARGET_RETURN and target_return is not None:
             ret_row = [0.0] * n_vars
             for i in range(n_assets):
                 ret_row[i] = -float(expected_returns[i])
@@ -218,11 +245,9 @@ class RockafellarMeanCVaROptimizer:
             ub_b.append(-float(target_return))
             labels.append(f"Target expected return >= {target_return:.4f}")
 
-        # 3. CVaR Budget constraint (if MAXIMIZE_RETURN_CVAR_BUDGET):
+        # 3. CVaR Budget constraint (if MAXIMIZE_RETURN_CVAR_BUDGET or EPSILON_CONSTRAINT and cvar_budget is provided):
         # Net CVaR <= cvar_budget
-        if objective == OptimizationObjective.MAXIMIZE_RETURN_CVAR_BUDGET:
-            if cvar_budget is None:
-                cvar_budget = 0.15
+        if objective in (OptimizationObjective.MAXIMIZE_RETURN_CVAR_BUDGET, OptimizationObjective.EPSILON_CONSTRAINT) and cvar_budget is not None:
             cvar_row = [0.0] * n_vars
             cvar_row[gamma_idx] = 1.0
             for s in range(n_scens):

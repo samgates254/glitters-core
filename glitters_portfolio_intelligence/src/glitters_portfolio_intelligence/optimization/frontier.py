@@ -119,7 +119,7 @@ class EfficientFrontierExplorer:
             scenario_probabilities=scenario_probabilities,
             constraints=constraints,
             objective=OptimizationObjective.MINIMIZE_CVAR_TARGET_RETURN,
-            target_return=-1e9,
+            target_return=None,  # Genuinely unconstrained Min-CVaR endpoint
             alpha=alpha,
             backend=backend,
         )
@@ -138,7 +138,7 @@ class EfficientFrontierExplorer:
             scenario_probabilities=scenario_probabilities,
             constraints=constraints,
             objective=OptimizationObjective.MAXIMIZE_RETURN_CVAR_BUDGET,
-            cvar_budget=1e9,
+            cvar_budget=None,  # Genuinely unconstrained Max-Return endpoint
             alpha=alpha,
             backend=backend,
         )
@@ -160,6 +160,8 @@ class EfficientFrontierExplorer:
         epsilons = np.linspace(min_cvar, max_cvar, n_points)
         raw_points: list[FrontierPoint] = []
 
+        from ..scenarios.cvar_verifier import compute_rockafellar_cvar_1d
+
         for eps in epsilons:
             res = RockafellarMeanCVaROptimizer.optimize(
                 assets=assets,
@@ -172,18 +174,36 @@ class EfficientFrontierExplorer:
                 backend=backend,
             )
             if res.is_optimal:
-                # Verify feasibility against epsilon budget
-                is_feas = (res.cvar_alpha <= eps + 1e-4)
+                # Filter out epsilon-infeasible points strictly
+                if res.cvar_alpha > (eps + 1e-4):
+                    continue
+
+                # Independently verify CVaR and return from solution weights
+                w_sol = np.array(res.optimal_weights, dtype=np.float64)
+                gross_ret = float(np.sum(w_sol * np.sum(scenario_returns * scenario_probabilities, axis=1)))
+
+                if constraints.requires_turnover_variables and constraints.initial_weights is not None:
+                    w0 = np.array(constraints.initial_weights, dtype=np.float64)
+                    c_buy = constraints.buy_transaction_cost_rate
+                    c_sell = constraints.sell_transaction_cost_rate
+                    tx_fee = float(np.sum(c_buy * np.maximum(0.0, w_sol - w0) + c_sell * np.maximum(0.0, w0 - w_sol)))
+                else:
+                    tx_fee = 0.0
+
+                net_ret = gross_ret - tx_fee
+                net_losses = -(w_sol @ scenario_returns) + tx_fee
+                emp_diag = compute_rockafellar_cvar_1d(net_losses, scenario_probabilities, alpha=alpha)
+
                 raw_points.append(
                     FrontierPoint(
-                        expected_return=res.expected_return,
-                        cvar_alpha=res.cvar_alpha,
-                        var_alpha=res.var_alpha,
+                        expected_return=net_ret,
+                        cvar_alpha=emp_diag.cvar,
+                        var_alpha=emp_diag.var,
                         weights=tuple(float(w) for w in res.optimal_weights),
                         method="EPSILON_CONSTRAINT",
                         parameter_value=float(eps),
                         solver_status=res.status,
-                        is_feasible_epsilon=is_feas,
+                        is_feasible_epsilon=True,
                     )
                 )
 
@@ -194,7 +214,11 @@ class EfficientFrontierExplorer:
             points=tuple(filtered),
             method="EPSILON_CONSTRAINT",
             is_convex_verified=is_convex,
-            summary_notes="Epsilon-constraint method sweeping genuine risk interval with non-convex Pareto recovery.",
+            summary_notes=(
+                "Discrete sampled efficient frontier generated via epsilon-constraint sweep. "
+                "Finite grid sampling explores non-supported Pareto points on non-convex sets "
+                "but does not certify complete continuous frontier coverage."
+            ),
         )
 
     @classmethod
@@ -217,9 +241,12 @@ class EfficientFrontierExplorer:
 
     @classmethod
     def _verify_convexity(cls, points: Sequence[FrontierPoint]) -> bool:
-        """Verifies if marginal return per unit risk (slope dR/dC) is non-increasing."""
+        """
+        Verifies if marginal return per unit risk (slope dR/dC) is non-increasing.
+        A frontier with fewer than 3 points cannot mathematically establish convexity.
+        """
         if len(points) < 3:
-            return True
+            return False
 
         slopes = []
         for i in range(len(points) - 1):
@@ -228,8 +255,8 @@ class EfficientFrontierExplorer:
             if dc > 1e-5:
                 slopes.append(dr / dc)
 
-        # For a strictly concave/diminishing returns frontier, slope should not surge upward
+        # For a convex risk-return frontier, slopes should be non-increasing
         for i in range(len(slopes) - 1):
-            if slopes[i + 1] > slopes[i] + 0.10:  # significant upward kink indicates non-convexity
+            if slopes[i + 1] > slopes[i] + 0.05:  # upward kink indicates non-convexity
                 return False
-        return True
+        return len(slopes) >= 2

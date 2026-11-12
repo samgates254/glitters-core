@@ -44,7 +44,11 @@ from glitters_portfolio_intelligence.optimization.solver_backends import (
     SolverExecutionResult,
 )
 from glitters_portfolio_intelligence.scenarios.cvar_verifier import compute_rockafellar_cvar_1d
-from glitters_portfolio_intelligence.scenarios.provenance import ScenarioDefinition
+from glitters_portfolio_intelligence.scenarios.provenance import (
+    EvidenceArtifactRegistry,
+    ScenarioDefinition,
+    default_evidence_registry,
+)
 from glitters_portfolio_intelligence.scenarios.stress_engine import ScenarioStressEngine
 from glitters_portfolio_intelligence.scenarios.validation import validate_scenario_distribution
 
@@ -535,13 +539,16 @@ class TestRemediationSprintR1_1(unittest.TestCase):
             cash_reserves_cents=10_000_000_00,
         )
 
-        # 1. Verified historical evidence -> HIGH_CONFIDENCE
+        # 1. Verified historical evidence -> HIGH_CONFIDENCE (requires authenticated artifact)
+        digest = default_evidence_registry.register_artifact("HASS-HIST-TEST", b"verified_historical_dataset_bytes")
         env_high = InvestmentDecisionGovernanceGate.create_recommendation_envelope(
             portfolio=portfolio,
             solver_result=dummy_opt,
             caller=self.caller,
             provenance=ScenarioProvenanceKind.HISTORICAL_OBSERVATION,
             scenario_evidence_verified=True,
+            dataset_identifier="HASS-HIST-TEST",
+            dataset_sha256=digest,
         )
         self.assertEqual(env_high.confidence_tier, ConfidenceTier.HIGH_CONFIDENCE)
 
@@ -612,6 +619,7 @@ class TestRemediationSprintR1_1(unittest.TestCase):
             cash_reserves_cents=10_000_000_00,
         )
         # Without scenario inputs, uncertainty is explicitly unavailable/unsupported, never falling back to CVaR
+        # Volatility is explicitly -1.0 (indicating unavailable, not 0.0 or NaN), and no NaN serialized
         env = InvestmentDecisionGovernanceGate.create_recommendation_envelope(
             portfolio=portfolio,
             solver_result=dummy_opt,
@@ -619,10 +627,11 @@ class TestRemediationSprintR1_1(unittest.TestCase):
             scenario_returns=None,
             scenario_probabilities=None,
         )
-        self.assertEqual(env.payload.portfolio_volatility, 0.0)
-        self.assertTrue(math.isnan(env.uncertainty.lower_bound))
-        self.assertTrue(math.isnan(env.uncertainty.upper_bound))
+        self.assertEqual(env.payload.portfolio_volatility, -1.0)
         self.assertEqual(env.uncertainty.interval_type, "UNAVAILABLE_MISSING_SCENARIOS")
+        self.assertEqual(env.uncertainty.confidence_level, 0.0)
+        self.assertEqual(env.uncertainty.lower_bound, dummy_opt.expected_return)
+        self.assertEqual(env.uncertainty.upper_bound, dummy_opt.expected_return)
 
     # 17. Time-limit, unbounded and unknown solver statuses
     def test_distinct_solver_status_mapping(self):
@@ -728,11 +737,11 @@ class TestRemediationSprintR1_1(unittest.TestCase):
 
     # 20. Historical scenario evidence identifiers
     def test_historical_scenario_evidence_identifiers(self):
-        # Canonical scenarios have supporting dataset identifiers and SHA256 hashes
+        # Canonical scenarios have supporting dataset identifiers and SHA256 hashes declared
         canonical = ScenarioStressEngine.get_canonical_scenarios()
         for sc in canonical:
             if sc.provenance == ScenarioProvenanceKind.HISTORICAL_OBSERVATION:
-                self.assertTrue(sc.has_verified_historical_evidence)
+                self.assertTrue(sc.has_declared_evidence_parameters)
                 self.assertIsNotNone(sc.dataset_identifier)
                 self.assertEqual(len(sc.dataset_sha256), 64)
 

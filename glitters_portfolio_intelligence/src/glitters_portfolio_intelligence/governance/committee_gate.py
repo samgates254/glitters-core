@@ -27,6 +27,7 @@ from glitters_contracts import (
 from ..domain.entities import Portfolio, PropertyAsset
 from ..domain.enums import OptimizationStatus, ScenarioProvenanceKind
 from ..optimization.solver_backends import SolverExecutionResult
+from ..scenarios.provenance import EvidenceArtifactRegistry, ScenarioDefinition, default_evidence_registry
 from ..scenarios.validation import validate_scenario_distribution
 
 
@@ -50,6 +51,10 @@ class InvestmentDecisionGovernanceGate:
         scenario_probabilities: Optional[np.ndarray] = None,
         provenance: Optional[ScenarioProvenanceKind] = None,
         scenario_evidence_verified: Optional[bool] = None,
+        evidence_registry: Optional[EvidenceArtifactRegistry] = None,
+        scenarios: Optional[Sequence[ScenarioDefinition]] = None,
+        dataset_identifier: Optional[str] = None,
+        dataset_sha256: Optional[str] = None,
         policy_id: str = "POL-PORTFOLIO-ALLOCATION-2026",
         threshold_for_committee_cents: int = 10_000_000_00,  # KES 10M
     ) -> AlgorithmDecisionEnvelope[PortfolioInvestmentBridge]:
@@ -82,7 +87,7 @@ class InvestmentDecisionGovernanceGate:
             w = float(solver_result.optimal_weights[i])
             holdings.append((a.asset_id, round(w, 4)))
 
-        # 3. Compute empirical scenario volatility, sample standard error, and effective sample size
+        # 3. Compute empirical scenario dispersion and mark formal sampling confidence intervals unavailable
         has_scenario_inputs = (
             scenario_returns is not None
             and scenario_probabilities is not None
@@ -98,18 +103,21 @@ class InvestmentDecisionGovernanceGate:
             var = float(np.sum(valid_probs * ((port_scen_returns - mu) ** 2)))
             portfolio_volatility = float(np.sqrt(max(0.0, var)))
             eff_sample_size = float(1.0 / np.sum(valid_probs ** 2))
-            # Standard error of the expected return point estimate
-            std_err = portfolio_volatility / math.sqrt(max(1.0, eff_sample_size))
-            unc_lower = solver_result.expected_return - 1.96 * std_err
-            unc_upper = solver_result.expected_return + 1.96 * std_err
-            interval_type = "STANDARD_ERROR_NORMAL_95"
-            epistemic_status = "ESTIMATED_SAMPLE_CONFIDENCE_INTERVAL" if solver_result.is_optimal else "FAILED_OR_INFEASIBLE"
+
+            # Designed stress scenarios represent deterministic test cases, not i.i.d. random population samples.
+            # Formal statistical confidence intervals are marked unavailable to preserve scientific integrity.
+            interval_type = "UNAVAILABLE_DESIGNED_STRESS_SCENARIOS"
+            epistemic_status = "DESCRIPTIVE_DISPERSION_ONLY_NO_SAMPLING_CI"
+            unc_lower = round(solver_result.expected_return, 6)
+            unc_upper = round(solver_result.expected_return, 6)
+            conf_level = 0.0
         else:
-            # Explicit unsupported/missing state: NEVER use CVaR as fallback volatility!
-            portfolio_volatility = 0.0
+            # Explicit unsupported/missing state: do not use zero volatility to represent missing data
+            portfolio_volatility = -1.0  # Sentinel indicating missing volatility (not zero risk)
             eff_sample_size = 0.0
-            unc_lower = float("nan")
-            unc_upper = float("nan")
+            unc_lower = round(solver_result.expected_return, 6)
+            unc_upper = round(solver_result.expected_return, 6)
+            conf_level = 0.0
             interval_type = "UNAVAILABLE_MISSING_SCENARIOS"
             epistemic_status = "UNSUPPORTED_NO_SCENARIOS"
 
@@ -167,9 +175,48 @@ class InvestmentDecisionGovernanceGate:
         payload_bytes = json.dumps(payload_dict, sort_keys=True).encode("utf-8")
         result_hash = hashlib.sha256(payload_bytes).hexdigest()
 
-        # Dynamic provenance hash
-        prov_data = f"engine08_{portfolio.portfolio_id}_{portfolio.tenant_org_id}_{solver_result.solver_type.value}_{solver_result.solver_version}_{policy_id}"
-        prov_hash = hashlib.sha256(prov_data.encode("utf-8")).hexdigest()
+        # Deterministic cryptographic canonical provenance hash
+        reg = evidence_registry if evidence_registry is not None else default_evidence_registry
+        prov_canonical = {
+            "engine": "glitters_portfolio_intelligence",
+            "engine_version": "0.8.0",
+            "policy_id": policy_id,
+            "portfolio_id": portfolio.portfolio_id,
+            "tenant_org_id": str(portfolio.tenant_org_id),
+            "solver_backend": solver_result.solver_type.value,
+            "solver_version": solver_result.solver_version,
+            "objective_value": round(float(solver_result.objective_value), 6),
+            "assets": [
+                {
+                    "asset_id": a.asset_id,
+                    "val_cents": a.current_valuation_cents,
+                    "acq_cents": a.acquisition_valuation_cents,
+                    "gpr_cents": a.monthly_gross_potential_rent_cents,
+                    "opex_cents": a.monthly_operating_expense_cents,
+                    "capex_cents": a.planned_capex_cents,
+                    "maintenance_cents": a.annual_routine_maintenance_cents,
+                    "debt_cents": a.annual_debt_service_cents,
+                    "vacancy": round(float(a.annual_baseline_vacancy_rate), 6),
+                    "credit_loss": round(float(a.annual_baseline_credit_loss_rate), 6),
+                }
+                for a in sorted(target_assets, key=lambda x: x.asset_id)
+            ],
+            "scenarios": [
+                {
+                    "scenario_id": s.scenario_id,
+                    "probability": round(float(s.probability), 6),
+                    "provenance": s.provenance.value,
+                    "dataset_identifier": s.dataset_identifier or "",
+                    "dataset_sha256": s.dataset_sha256 or "",
+                    "model_version": s.model_version,
+                    "transformation": s.transformation_methodology,
+                    "assumptions": {k: round(float(v), 6) for k, v in sorted(s.assumptions.items())},
+                }
+                for s in sorted(scenarios, key=lambda x: x.scenario_id)
+            ] if scenarios else [],
+        }
+        prov_json = json.dumps(prov_canonical, sort_keys=True, separators=(",", ":"))
+        prov_hash = hashlib.sha256(prov_json.encode("utf-8")).hexdigest()
 
         audit_event = EngineAuditEvent(
             event_id=uuid4(),
@@ -197,19 +244,42 @@ class InvestmentDecisionGovernanceGate:
             (AlgorithmicExecutionStatus.ABSTAINED_INSUFFICIENT_DATA, AbstentionReason.INSUFFICIENT_DATA),
         )
 
-        # 8. Rigorous Confidence Tier based on evidenced provenance (not just solver optimality)
-        effective_prov = provenance
-        effective_verified = scenario_evidence_verified
+        # 8. Rigorous Confidence Tier based on independently authenticated evidence
+        # Missing provenance must never default to historical observation.
+        # Missing evidence must never default to verified.
+        # A caller-supplied Boolean alone CANNOT authenticate evidence.
+        if scenarios is not None and len(scenarios) > 0:
+            all_historical_authenticated = all(
+                s.is_evidence_authenticated(reg)
+                for s in scenarios
+                if s.provenance == ScenarioProvenanceKind.HISTORICAL_OBSERVATION
+            )
+            has_historical = any(s.provenance == ScenarioProvenanceKind.HISTORICAL_OBSERVATION for s in scenarios)
+            has_synthetic = any(s.provenance == ScenarioProvenanceKind.SYNTHETIC_SCENARIO for s in scenarios)
+            has_unverified = any(
+                s.provenance == ScenarioProvenanceKind.HISTORICAL_OBSERVATION and not s.is_evidence_authenticated(reg)
+                for s in scenarios
+            )
 
-        if effective_prov is None:
-            # When caller does not specify provenance (legacy default), treat as historical
-            effective_prov = ScenarioProvenanceKind.HISTORICAL_OBSERVATION
-            effective_verified = (scenario_evidence_verified is not False)
-        elif effective_verified is None:
-            effective_verified = False
+            if has_historical and all_historical_authenticated and not has_synthetic and not has_unverified:
+                effective_prov = ScenarioProvenanceKind.HISTORICAL_OBSERVATION
+                is_authenticated = True
+            elif has_synthetic:
+                effective_prov = ScenarioProvenanceKind.SYNTHETIC_SCENARIO
+                is_authenticated = False
+            else:
+                effective_prov = ScenarioProvenanceKind.EXPERT_ASSUMPTION
+                is_authenticated = False
+        else:
+            # Omitted provenance defaults to EXPERT_ASSUMPTION, never historical!
+            effective_prov = provenance if provenance is not None else ScenarioProvenanceKind.EXPERT_ASSUMPTION
+            if effective_prov == ScenarioProvenanceKind.HISTORICAL_OBSERVATION:
+                is_authenticated = reg.is_artifact_authenticated(dataset_identifier, dataset_sha256)
+            else:
+                is_authenticated = False
 
         if solver_result.is_optimal:
-            if effective_prov == ScenarioProvenanceKind.HISTORICAL_OBSERVATION and effective_verified:
+            if effective_prov == ScenarioProvenanceKind.HISTORICAL_OBSERVATION and is_authenticated:
                 conf_tier = ConfidenceTier.HIGH_CONFIDENCE
             elif effective_prov in (
                 ScenarioProvenanceKind.HISTORICAL_OBSERVATION,
@@ -247,10 +317,10 @@ class InvestmentDecisionGovernanceGate:
             status=status_mapped,
             confidence_tier=conf_tier,
             uncertainty=UncertaintyBounds(
-                point_estimate=solver_result.expected_return,
+                point_estimate=round(solver_result.expected_return, 6),
                 lower_bound=unc_lower,
                 upper_bound=unc_upper,
-                confidence_level=0.95,
+                confidence_level=conf_level,
                 interval_type=interval_type,
                 effective_sample_size=eff_sample_size,
                 epistemic_status=epistemic_status,
@@ -260,7 +330,7 @@ class InvestmentDecisionGovernanceGate:
             requires_human_approval=requires_committee,
             audit_event=audit_event,
             result_hash_sha256=result_hash,
-            execution_duration_ms=solver_result.solve_time_seconds * 1000.0,
+            execution_duration_ms=round(solver_result.solve_time_seconds * 1000.0, 2),
             contract_version=ContractVersion.V1_1,
             abstention_reason=abstention_reason,
             human_approval_requirement=approval_req,
