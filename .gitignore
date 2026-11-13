@@ -54,3 +54,4 @@ htmlcov/
 
 # Datasets generated during testing
 *.csv
+uv.lock

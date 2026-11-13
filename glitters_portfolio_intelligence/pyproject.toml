@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glitters-portfolio-intelligence"
+version = "0.8.0"
+description = "GLITTERS Engine 08: Portfolio Optimization & Investment Intelligence (Rockafellar-Uryasev Mean-CVaR, Exact Minor-Unit KES Cash Flows, Multi-Period Rebalancing, and Multi-Solver Backends)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Proprietary - GLITTERS Algorithmic Platform"}
+authors = [
+    {name = "GLITTERS Portfolio Optimization & Quantitative Finance Engineering"}
+]
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "pandas>=2.0.0",
+    "pydantic>=2.0.0",
+    "ortools>=9.6.0",
+    "glitters-contracts>=1.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "mypy>=1.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
