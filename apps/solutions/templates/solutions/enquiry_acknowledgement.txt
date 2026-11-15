@@ -1,0 +1,11 @@
+GLITTERS EQUITY & INVESTMENT SOLUTIONS
+
+We have recorded enquiry {{ reference }}.
+
+This message confirms that the enquiry was received. It is not an insurer quotation, not a personalised investment recommendation, and not an offer to buy or sell a security. GLITTERS does not execute trades, hold investment funds, or conduct an online auction through this enquiry.
+
+{% if state %}Next step: {{ state }}.{% endif %}
+{% if summary %}{{ summary }}{% endif %}
+{% if premium_minor %}An authorised partner API returned {{ currency }} {{ premium_minor }} in minor units. That figure comes from the partner, not from GLITTERS.{% endif %}
+
+The responsible partner will follow up using the contact method you selected.

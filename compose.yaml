@@ -1,0 +1,98 @@
+name: glitters-core
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.5
+    container_name: glitters-postgres
+    environment:
+      POSTGRES_USER: glitters
+      POSTGRES_PASSWORD: glitters-dev-only
+      POSTGRES_DB: glitters
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - glitters_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U glitters -d glitters"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: glitters-redis
+    ports:
+      - "127.0.0.1:6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    profiles: ["app"]
+    build: .
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.development
+      DATABASE_URL: postgres://glitters:glitters-dev-only@postgres:5432/glitters
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,api,testserver
+      GLITTERS_AUTO_MIGRATE: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8010:8000"
+
+  worker:
+    profiles: ["app"]
+    build: .
+    command: ["celery", "-A", "config.celery", "worker", "--loglevel=INFO", "--concurrency=2"]
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.development
+      DATABASE_URL: postgres://glitters:glitters-dev-only@postgres:5432/glitters
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    profiles: ["app"]
+    build: .
+    command: ["celery", "-A", "config.celery", "beat", "--loglevel=INFO"]
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.development
+      DATABASE_URL: postgres://glitters:glitters-dev-only@postgres:5432/glitters
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  nginx:
+    profiles: ["proxy"]
+    image: nginx:1.28-alpine
+    depends_on:
+      - api
+    volumes:
+      - ./infrastructure/nginx/glitters.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "127.0.0.1:8088:8080"
+
+volumes:
+  glitters_postgres_data:

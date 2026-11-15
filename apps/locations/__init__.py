@@ -1,0 +1,1 @@
+"""Location reference data."""

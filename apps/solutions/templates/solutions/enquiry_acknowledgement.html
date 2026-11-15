@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+  <body style="font-family: Georgia, serif; color: #172033; background: #ffffff;">
+    <p style="letter-spacing: 0.08em; font-size: 12px;">GLITTERS EQUITY &amp; INVESTMENT SOLUTIONS</p>
+    <h1 style="font-weight: normal;">Enquiry {{ reference }}</h1>
+    <p>We have recorded this enquiry. This message is an acknowledgement.</p>
+    <p>
+      It is not an insurer quotation, not a personalised investment recommendation,
+      and not an offer to buy or sell a security. GLITTERS does not execute trades,
+      hold investment funds, or conduct an online auction through this enquiry.
+    </p>
+    {% if state %}<p>Next step: {{ state }}.</p>{% endif %}
+    {% if summary %}<p>{{ summary }}</p>{% endif %}
+    {% if premium_minor %}
+      <p>
+        An authorised partner API returned {{ currency }} {{ premium_minor }} in minor units.
+        That figure comes from the partner, not from GLITTERS.
+      </p>
+    {% endif %}
+  </body>
+</html>

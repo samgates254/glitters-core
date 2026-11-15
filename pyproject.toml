@@ -1,0 +1,57 @@
+[project]
+name = "glitters-core"
+version = "0.1.0"
+description = "GLITTERS CORE backend for GLITTERS EQUITY INVESTMENT SOLUTIONS"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+authors = [{ name = "GLITTERS EQUITY INVESTMENT SOLUTIONS" }]
+dependencies = [
+  "django[argon2]>=5.2.19,<5.3",
+  "djangorestframework>=3.15.2",
+  "django-cors-headers>=4.6",
+  "django-environ>=0.11",
+  "drf-spectacular>=0.28",
+  "psycopg[binary]>=3.2",
+  "redis>=5.2",
+  "celery>=5.4",
+  "gunicorn>=23",
+  "uvicorn>=0.32",
+  "boto3>=1.44.0",
+  "pillow>=13.0.0",
+  "glitters-geospatial-engine @ file:///home/mr-robot/Projects/glitters-engines/glitters_geospatial_engine/dist/glitters_geospatial_engine-1.1.0-py3-none-any.whl",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-django>=4.9",
+  "pytest-cov>=6.0",
+  "ruff>=0.8",
+  "pip-audit>=2.8",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["apps", "config", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"config/settings/*.py" = ["F403", "F405"]
+"tests/**/*.py" = ["S101", "S105", "S106"]
+"**/migrations/*.py" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["apps", "config"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.development"
+django_debug_mode = "keep"
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
