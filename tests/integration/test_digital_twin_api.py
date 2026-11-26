@@ -9,11 +9,12 @@ from pathlib import Path
 
 import pytest
 from django.contrib.gis.geos import MultiPolygon, Polygon
-from django.test import Client
-from django.urls import reverse
+from django.test import Client, override_settings
 
+from apps.identity.models import User
 from apps.organizations.models import Organization
 from apps.spatial.domain import (
+    SRID_WGS84,
     BuildingClassification,
     DatasetCategory,
     DatasetVersionStatus,
@@ -21,7 +22,6 @@ from apps.spatial.domain import (
     DigitalTwinStatus,
     HeightSource,
     LicenseType,
-    SRID_WGS84,
 )
 from apps.spatial.models import (
     Building,
@@ -196,37 +196,57 @@ def test_generate_digital_twin_tileset(sample_buildings, tmp_path):
 @pytest.mark.django_db
 def test_digital_twin_api_endpoints(sample_buildings, tmp_path):
     gen = generate_digital_twin_tileset(sample_buildings, output_base_dir=tmp_path)
+    generations_before = DigitalTwinGeneration.objects.count()
+    anonymous = Client()
+    denied = anonymous.get("/api/v1/spatial/digital-twins/")
+    assert denied.status_code in {401, 403}
+    assert DigitalTwinGeneration.objects.count() == generations_before
+
+    user = User.objects.create_user(
+        email="twin-reader@example.com",
+        password="SecurePassword123!",
+    )
     client = Client()
+    client.force_login(user)
 
-    # 1. List digital twins
-    res = client.get("/api/v1/spatial/digital-twins/")
-    assert res.status_code == 200
-    assert res.json()["count"] >= 1
+    with override_settings(SPATIAL_TILESET_ROOT=str(tmp_path)):
+        # 1. List digital twins
+        res = client.get("/api/v1/spatial/digital-twins/")
+        assert res.status_code == 200
+        assert res.json()["count"] >= 1
 
-    # 2. Get digital twin detail
-    res = client.get(f"/api/v1/spatial/digital-twins/{gen.id}/")
-    assert res.status_code == 200
-    assert res.json()["building_count"] == 3
+        # 2. Get digital twin detail
+        res = client.get(f"/api/v1/spatial/digital-twins/{gen.id}/")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["building_count"] == 3
+        assert "tileset_path" not in body
 
-    # 3. Get tileset.json
-    res = client.get(f"/api/v1/spatial/digital-twins/{gen.id}/tileset/")
-    assert res.status_code == 200
-    assert res.headers["Content-Type"] == "application/json"
-    tileset = res.json()
-    assert tileset["asset"]["version"] == "1.1"
-    assert "boundingVolume" in tileset["root"]
+        # 3. Get tileset.json from the configured root only
+        res = client.get(f"/api/v1/spatial/digital-twins/{gen.id}/tileset/")
+        assert res.status_code == 200
+        assert res.headers["Content-Type"] == "application/json"
+        assert res.headers.get("Access-Control-Allow-Origin") != "*"
+        assert "private" in res.headers["Cache-Control"]
+        tileset = res.json()
+        assert tileset["asset"]["version"] == "1.1"
+        assert "boundingVolume" in tileset["root"]
 
-    # 4. Get binary tile
-    res = client.get(f"/api/v1/spatial/digital-twins/{gen.id}/tiles/tile_0.glb")
-    assert res.status_code == 200
-    tile_content = b"".join(res.streaming_content)
-    assert tile_content[:4] == b"glTF"
+        # 4. Get binary tile
+        res = client.get(f"/api/v1/spatial/digital-twins/{gen.id}/tiles/tile_0.glb")
+        assert res.status_code == 200
+        tile_content = b"".join(res.streaming_content)
+        assert tile_content[:4] == b"glTF"
 
-    # 5. Get active tileset
-    res = client.get("/api/v1/spatial/digital-twins/active-tileset/")
-    assert res.status_code == 200
-    active_tileset = res.json()
-    assert "/tiles/tile_0.glb" in active_tileset["root"]["content"]["uri"]
+        escaped = client.get(f"/api/v1/spatial/digital-twins/{gen.id}/tiles/..")
+        assert escaped.status_code == 404
+
+        # 5. Active tileset reads an existing file and does not generate another
+        res = client.get("/api/v1/spatial/digital-twins/active-tileset/")
+        assert res.status_code == 200
+        assert DigitalTwinGeneration.objects.count() == generations_before
+        active_tileset = res.json()
+        assert "/tiles/tile_0.glb" in active_tileset["root"]["content"]["uri"]
 
     # 6. Building digital-twin action by URN
     urn = sample_buildings[0].canonical_urn
@@ -236,3 +256,4 @@ def test_digital_twin_api_endpoints(sample_buildings, tmp_path):
     assert twin_data["canonical_urn"] == urn
     assert twin_data["height_source"] == HeightSource.SURVEY_VERIFIED_HEIGHT
     assert len(twin_data["provenance_records"]) >= 2
+    assert "storage_path" not in twin_data

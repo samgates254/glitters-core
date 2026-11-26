@@ -74,6 +74,7 @@ def _setup_settings(module: str, **overrides: str) -> subprocess.CompletedProces
             "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6381/2",
             "CORS_ALLOWED_ORIGINS": "https://app.glitters.example",
             "CSRF_TRUSTED_ORIGINS": "https://app.glitters.example",
+            "DJANGO_EMAIL_BACKEND": "django.core.mail.backends.smtp.EmailBackend",
         }
     )
     environment.update(overrides)
@@ -100,6 +101,13 @@ def test_deployed_settings_refuse_debug_and_accept_an_explicit_environment(modul
     rejected_hosts = _setup_settings(module, DJANGO_ALLOWED_HOSTS="*")
     assert rejected_hosts.returncode != 0
     assert "DJANGO_ALLOWED_HOSTS" in f"{rejected_hosts.stdout}\n{rejected_hosts.stderr}"
+
+    rejected_email = _setup_settings(
+        module,
+        DJANGO_EMAIL_BACKEND="django.core.mail.backends.console.EmailBackend",
+    )
+    assert rejected_email.returncode != 0
+    assert "DJANGO_EMAIL_BACKEND" in f"{rejected_email.stdout}\n{rejected_email.stderr}"
 
     accepted = _setup_settings(module)
     assert accepted.returncode == 0, accepted.stderr

@@ -14,7 +14,6 @@ from apps.organizations.domain import (
     MembershipStatus,
     OrganizationStatus,
     Permission,
-    Role,
     permissions_for,
 )
 from apps.organizations.models import Organization, OrganizationMembership
@@ -24,6 +23,7 @@ from apps.operations.domain import (
     AGREEMENT_TRANSITIONS,
     ALREADY_RESOLVED,
     COMMISSION_INVALID,
+    CONFLICT,
     COUNTERPARTY_MISMATCH,
     DATE_RANGE_INVALID,
     EFFECTIVE_DATE_INVALID,
@@ -47,7 +47,6 @@ from apps.properties.domain import (
     AccessCapability,
     AccessOrigin,
     AccessStatus,
-    ManagementContext,
     PropertyStatus,
 )
 from apps.properties.models import Property, PropertyAccess
@@ -62,8 +61,8 @@ def verify_owner_authority(user, property_record: Property) -> PropertyAccess:
 
     Crucial: Unverified claims in PropertyParty NEVER satisfy this check.
     Inherited delegated grants from prior agreements NEVER satisfy this check.
-    The user must possess an explicit active direct PropertyAccess with MANAGE capability,
-    or for corporate properties, be an active OWNER or ADMIN in the managing organization.
+    Organization membership is not property title and never mints a DIRECT grant.
+    The user must already possess an explicit active direct PropertyAccess with MANAGE capability.
     """
     ensure_active_account(user)
 
@@ -81,37 +80,6 @@ def verify_owner_authority(user, property_record: Property) -> PropertyAccess:
     )
     if direct_grant is not None:
         return direct_grant
-
-    # Check organizational authority if property belongs to an organization
-    if property_record.management_context == ManagementContext.ORGANIZATION:
-        org = property_record.managing_organization
-        if org and org.status == OrganizationStatus.ACTIVE:
-            membership = OrganizationMembership.objects.filter(
-                organization=org,
-                user=user,
-                status=MembershipStatus.ACTIVE,
-            ).first()
-            if membership and membership.role in {Role.OWNER, Role.ADMIN}:
-                existing = PropertyAccess.objects.filter(
-                    property=property_record,
-                    user=user,
-                    status=AccessStatus.ACTIVE,
-                ).first()
-                if existing is not None:
-                    if existing.capability != AccessCapability.MANAGE:
-                        existing.capability = AccessCapability.MANAGE
-                        existing.save(update_fields=["capability"])
-                    return existing
-
-                grant = PropertyAccess.objects.create(
-                    property=property_record,
-                    user=user,
-                    capability=AccessCapability.MANAGE,
-                    status=AccessStatus.ACTIVE,
-                    origin=AccessOrigin.DIRECT,
-                    granted_by=user,
-                )
-                return grant
 
     raise OperationsError(UNAUTHORIZED_OWNER, status_code=403)
 

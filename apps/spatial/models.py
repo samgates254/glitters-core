@@ -924,6 +924,13 @@ class RasterAsset(models.Model):
 
 class RasterProcessingJob(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="raster_processing_jobs",
+    )
     input_item = models.ForeignKey(
         ImageryItem,
         on_delete=models.SET_NULL,

@@ -138,6 +138,8 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
+SPATIAL_TILESET_ROOT = env("SPATIAL_TILESET_ROOT", default=str(MEDIA_ROOT / "digital_twins"))
+SPATIAL_RASTER_ROOT = env("SPATIAL_RASTER_ROOT", default=str(MEDIA_ROOT / "rasters"))
 # Object bytes live in a private bucket. The default adapter keeps development
 # and the test suite independent of Cloudflare credentials.
 MEDIA_STORAGE_BACKEND = env("MEDIA_STORAGE_BACKEND", default="memory")
@@ -227,6 +229,7 @@ REST_FRAMEWORK = {
         # rotating-email spray. The create bucket also includes an email digest.
         "enquiry_create": "5/hour",
         "enquiry_create_address": "30/hour",
+        "spatial_compute": "30/minute",
     },
     "EXCEPTION_HANDLER": "config.api.glitters_exception_handler",
 }

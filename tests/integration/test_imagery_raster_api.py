@@ -2,19 +2,24 @@
 
 import datetime
 from pathlib import Path
+
 import numpy as np
 import pytest
 from django.contrib.gis.geos import Polygon
-from rest_framework.test import APIClient
-
-from apps.spatial.domain import ImageryDatasetType, RasterAssetType
-from apps.spatial.models import ImageryCollection, ImageryItem, RasterAsset
-from apps.spatial.services.spectral_service import _ensure_raster_dir
+from django.utils import timezone
 from glitters_geospatial_engine.raster.pipeline import (
     AffineGeotransform,
     GeoRasterTile,
     RasterProcessingPipeline,
 )
+from rest_framework.test import APIClient
+
+from apps.identity.models import User
+from apps.organizations.domain import MembershipSource, MembershipStatus, Role
+from apps.organizations.models import Organization, OrganizationMembership
+from apps.spatial.domain import ImageryDatasetType, RasterAssetType
+from apps.spatial.models import ImageryCollection, ImageryItem, RasterAsset
+from apps.spatial.services.spectral_service import _ensure_raster_dir
 
 
 @pytest.fixture
@@ -156,15 +161,48 @@ def test_raster_tile_endpoint(api_client, setup_imagery_test_data):
 
 @pytest.mark.django_db
 def test_raster_job_execution_api(api_client, setup_imagery_test_data):
-    """POST /api/v1/spatial/rasters/jobs/ triggers spectral index job."""
+    """POST /api/v1/spatial/rasters/jobs/ requires a member organization."""
     coll, item, visual_asset = setup_imagery_test_data
+    denied = api_client.post(
+        "/api/v1/spatial/rasters/jobs/",
+        data={"item_id": item.item_id, "operation": "savi", "parameters": {"L": 0.5}},
+        format="json",
+    )
+    assert denied.status_code in (401, 403)
+
+    org = Organization.objects.create(
+        legal_name="Mombasa Raster Lab",
+        display_name="Mombasa Raster Lab",
+        slug="mombasa-raster-lab",
+        organization_type="agency",
+    )
+    user = User.objects.create_user(
+        email="raster-operator@example.com",
+        password="SecurePassword123!",
+    )
+    OrganizationMembership.objects.create(
+        organization=org,
+        user=user,
+        role=Role.OWNER,
+        status=MembershipStatus.ACTIVE,
+        source=MembershipSource.CREATOR,
+        joined_at=timezone.now(),
+    )
+    api_client.force_authenticate(user=user)
 
     resp = api_client.post(
         "/api/v1/spatial/rasters/jobs/",
-        data={"item_id": item.item_id, "operation": "savi", "parameters": {"L": 0.5}},
+        data={
+            "item_id": item.item_id,
+            "operation": "savi",
+            "parameters": {"L": 0.5},
+            "organization_id": str(org.id),
+        },
         format="json",
     )
     assert resp.status_code in (200, 201)
     data = resp.json()
     assert data["status"] == "COMPLETED"
     assert data["output_asset_id"] is not None
+    assert data["organization_id"] == str(org.id)
+    assert "storage_path" not in data

@@ -3,9 +3,12 @@
 import datetime
 import pytest
 from django.contrib.gis.geos import MultiPolygon, Polygon
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.organizations.models import Organization
+from apps.identity.models import User
+from apps.organizations.domain import MembershipSource, MembershipStatus, Role
+from apps.organizations.models import Organization, OrganizationMembership
 from apps.spatial.domain import (
     BuildingAssociationType,
     ChangeCandidateStatus,
@@ -26,8 +29,10 @@ from apps.spatial.models import (
 
 
 @pytest.fixture
-def api_client():
-    return APIClient()
+def api_client(setup_change_data):
+    client = APIClient()
+    client.force_authenticate(user=setup_change_data["user_a"])
+    return client
 
 
 @pytest.fixture
@@ -38,6 +43,18 @@ def setup_change_data(db):
         display_name="County Government of Mombasa",
         slug="county-mombasa",
         organization_type="agency",
+    )
+    user_a = User.objects.create_user(
+        email="change-reader@example.com",
+        password="SecurePassword123!",
+    )
+    OrganizationMembership.objects.create(
+        organization=org_a,
+        user=user_a,
+        role=Role.OWNER,
+        status=MembershipStatus.ACTIVE,
+        source=MembershipSource.CREATOR,
+        joined_at=timezone.now(),
     )
     org_b = Organization.objects.create(
         legal_name="Kwale County Lands Registry",
@@ -118,6 +135,7 @@ def setup_change_data(db):
 
     return {
         "org_a": org_a,
+        "user_a": user_a,
         "org_b": org_b,
         "project": project,
         "run": run,

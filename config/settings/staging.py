@@ -14,6 +14,20 @@ if SECRET_KEY.startswith("change-me") or len(SECRET_KEY) < 50:
 if not ALLOWED_HOSTS or "*" in ALLOWED_HOSTS:
     raise ImproperlyConfigured("Set an explicit DJANGO_ALLOWED_HOSTS value for staging.")
 
+_LOCAL_EMAIL_BACKENDS = {
+    "django.core.mail.backends.console.EmailBackend",
+    "django.core.mail.backends.locmem.EmailBackend",
+    "django.core.mail.backends.filebased.EmailBackend",
+    "django.core.mail.backends.dummy.EmailBackend",
+}
+_configured_email = env("DJANGO_EMAIL_BACKEND", default="")
+if not _configured_email or _configured_email in _LOCAL_EMAIL_BACKENDS:
+    raise ImproperlyConfigured(
+        "Set DJANGO_EMAIL_BACKEND to an external mail backend. "
+        "Console and local email backends are refused because they can leak reset tokens."
+    )
+EMAIL_BACKEND = _configured_email
+
 # Credentials are checked when a request needs the bucket, not at import.
 MEDIA_STORAGE_BACKEND = env("MEDIA_STORAGE_BACKEND", default="r2")
 

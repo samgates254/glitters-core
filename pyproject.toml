@@ -18,8 +18,11 @@ dependencies = [
   "uvicorn>=0.32",
   "boto3>=1.44.0",
   "pillow>=13.0.0",
-  "glitters-geospatial-engine @ file:///home/mr-robot/Projects/glitters-engines/glitters_geospatial_engine/dist/glitters_geospatial_engine-1.1.0-py3-none-any.whl",
+  "glitters-geospatial-engine==1.1.0",
 ]
+
+[tool.uv.sources]
+glitters-geospatial-engine = { path = "vendor/wheels/glitters_geospatial_engine-1.1.0-py3-none-any.whl" }
 
 [dependency-groups]
 dev = [

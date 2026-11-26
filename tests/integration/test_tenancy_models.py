@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime
+
 import pytest
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from tests.organizations_support import verified_user
 from tests.properties_support import property_body
@@ -571,3 +573,63 @@ def test_rental_application_and_amendment(test_setup) -> None:
     )
     assert amendment.id is not None
     assert amendment.reference.startswith("AMD-")
+
+
+def test_executed_lease_cannot_return_to_draft_or_change_property(test_setup) -> None:
+    unit = test_setup["unit101"]
+    other = test_setup["unit102"]
+    landlord = test_setup["landlord"]
+    lease = Lease.objects.create(
+        property=unit,
+        property_owner=landlord,
+        start_date=datetime.date(2026, 4, 1),
+        term_end_date=datetime.date(2026, 4, 30),
+        effective_end_date=datetime.date(2026, 5, 1),
+        rent_amount_minor=40_000_00,
+        status=LeaseStatus.ACTIVE,
+        created_by=landlord,
+    )
+
+    lease.status = LeaseStatus.DRAFT
+    with pytest.raises(ValidationError, match="This status transition is not allowed."):
+        lease.save()
+    lease.refresh_from_db()
+    assert lease.status == LeaseStatus.ACTIVE
+    assert lease.rent_amount_minor == 40_000_00
+
+    with pytest.raises(ValidationError, match="This status transition is not allowed."):
+        Lease.objects.filter(pk=lease.pk).update(status=LeaseStatus.DRAFT)
+    lease.refresh_from_db()
+    assert lease.status == LeaseStatus.ACTIVE
+
+    lease.status = LeaseStatus.DRAFT
+    with pytest.raises(ValidationError, match="This status transition is not allowed."):
+        Lease.objects.bulk_update([lease], ["status"])
+    lease.refresh_from_db()
+    assert lease.status == LeaseStatus.ACTIVE
+    assert lease.property_id == unit.id
+
+    with pytest.raises(ValidationError, match="property_id"):
+        Lease.objects.filter(pk=lease.pk).update(property=other)
+    lease.refresh_from_db()
+    assert lease.property_id == unit.id
+    assert lease.rent_amount_minor == 40_000_00
+
+
+def test_pending_signature_may_expire_unsigned(test_setup) -> None:
+    unit = test_setup["unit102"]
+    landlord = test_setup["landlord"]
+    lease = Lease.objects.create(
+        property=unit,
+        property_owner=landlord,
+        start_date=datetime.date(2026, 6, 1),
+        term_end_date=datetime.date(2026, 6, 30),
+        effective_end_date=datetime.date(2026, 7, 1),
+        rent_amount_minor=40_000_00,
+        status=LeaseStatus.PENDING_SIGNATURE,
+        created_by=landlord,
+    )
+    lease.status = LeaseStatus.EXPIRED_UNSIGNED
+    lease.save()
+    lease.refresh_from_db()
+    assert lease.status == LeaseStatus.EXPIRED_UNSIGNED

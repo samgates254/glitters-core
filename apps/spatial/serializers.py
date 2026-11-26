@@ -169,7 +169,6 @@ class BuildingSerializer(serializers.ModelSerializer):
                     "lod_level": twin.lod_level,
                     "triangles_count": twin.triangles_count,
                     "vertex_count": twin.vertex_count,
-                    "storage_path": twin.storage_path,
                 }
         except Exception:
             pass
@@ -225,7 +224,6 @@ class LandParcelSerializer(serializers.ModelSerializer):
                     "lod_level": twin.lod_level,
                     "triangles_count": twin.triangles_count,
                     "vertex_count": twin.vertex_count,
-                    "storage_path": twin.storage_path,
                 }
         except Exception:
             pass
@@ -280,7 +278,6 @@ class DigitalTwinAssetSerializer(serializers.ModelSerializer):
             "id",
             "canonical_urn",
             "format",
-            "storage_path",
             "height_m",
             "height_source",
             "is_placeholder",
@@ -300,13 +297,13 @@ class DigitalTwinGenerationSerializer(serializers.ModelSerializer):
             "status",
             "building_count",
             "tileset_urn",
-            "tileset_path",
             "generator_version",
             "error_details",
             "duration_ms",
             "created_at",
             "updated_at",
         ]
+        read_only_fields = fields
 
 
 class RasterAssetSerializer(serializers.ModelSerializer):
@@ -318,7 +315,6 @@ class RasterAssetSerializer(serializers.ModelSerializer):
             "id",
             "asset_key",
             "asset_type",
-            "storage_path",
             "mime_type",
             "file_size_bytes",
             "checksum_sha256",
@@ -409,6 +405,7 @@ class RasterProcessingJobSerializer(serializers.ModelSerializer):
         model = RasterProcessingJob
         fields = [
             "id",
+            "organization_id",
             "input_item_id",
             "operation",
             "config_parameters",
@@ -555,6 +552,7 @@ class ChangeDetectionProjectSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ChangeDetectionProject
+        extra_kwargs = {"organization_id": {"required": False}}
         fields = [
             "id",
             "organization_id",
@@ -664,6 +662,7 @@ class SpatialAnalysisProjectSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SpatialAnalysisProject
+        extra_kwargs = {"organization_id": {"required": False}}
         fields = [
             "id",
             "organization_id",

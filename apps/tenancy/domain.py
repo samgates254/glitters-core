@@ -141,6 +141,27 @@ class LeaseStatus:
     # Statuses where the lease has reached legal execution and contractual terms are immutable
     EXECUTED = frozenset({FULLY_EXECUTED, ACTIVE, UNDER_RENEWAL, TERMINATED_NORMAL, TERMINATED_EARLY})
 
+    # Occupancy-reserving rows cannot fall back to draft. That would drop them out of
+    # tenancy_lease_exclude_overlapping_contractual_leases and then allow a rent rewrite.
+    ALLOWED_TRANSITIONS = {
+        DRAFT: frozenset({PENDING_SIGNATURE, CANCELLED}),
+        PENDING_SIGNATURE: frozenset({FULLY_EXECUTED, EXPIRED_UNSIGNED, CANCELLED}),
+        FULLY_EXECUTED: frozenset({ACTIVE, TERMINATED_NORMAL, TERMINATED_EARLY}),
+        ACTIVE: frozenset({UNDER_RENEWAL, TERMINATED_NORMAL, TERMINATED_EARLY}),
+        UNDER_RENEWAL: frozenset({ACTIVE, TERMINATED_NORMAL, TERMINATED_EARLY}),
+        TERMINATED_NORMAL: frozenset(),
+        TERMINATED_EARLY: frozenset(),
+        EXPIRED_UNSIGNED: frozenset(),
+        CANCELLED: frozenset(),
+    }
+
+
+def lease_transition_allowed(current: str, proposed: str) -> bool:
+    """Return whether a lease may move from current to proposed."""
+    if current == proposed:
+        return True
+    return proposed in LeaseStatus.ALLOWED_TRANSITIONS.get(current, frozenset())
+
 
 class LeasePartyRole:
     PRIMARY_TENANT = "primary_tenant"
