@@ -114,6 +114,53 @@ class SignLeaseSerializer(serializers.Serializer):
         return decode_rendered_document(self.validated_data["rendered_document_base64"])
 
 
+class RenewalLeaseSerializer(serializers.Serializer):
+    organization_id = serializers.UUIDField(required=False, allow_null=True)
+    idempotency_key = serializers.CharField(required=False, allow_blank=True, max_length=200)
+    lease_type = serializers.ChoiceField(choices=LeaseType.CHOICES)
+    start_date = serializers.DateField()
+    term_end_date = serializers.DateField()
+    rent_amount_minor = serializers.IntegerField(min_value=1)
+    rent_currency = serializers.CharField(required=False, min_length=3, max_length=3)
+    deposit_amount_minor = serializers.IntegerField(required=False, min_value=0)
+    service_charge_minor = serializers.IntegerField(required=False, min_value=0)
+    payment_due_day = serializers.IntegerField(required=False, min_value=1, max_value=28)
+    grace_period_days = serializers.IntegerField(required=False, min_value=0, max_value=30)
+    special_covenants = serializers.CharField(required=False, allow_blank=True, max_length=20_000)
+    parties = PartyInputSerializer(many=True)
+
+    def validate_idempotency_key(self, value: str) -> str:
+        return value.strip()
+
+    def payload(self) -> dict:
+        data = self.validated_data
+        body = {
+            "lease_type": data["lease_type"],
+            "start_date": data["start_date"],
+            "term_end_date": data["term_end_date"],
+            "rent_amount_minor": data["rent_amount_minor"],
+            "parties": [
+                {
+                    "user_id": party["user_id"],
+                    "party_role": party["party_role"],
+                    "has_signature_authority": party["has_signature_authority"],
+                }
+                for party in data["parties"]
+            ],
+        }
+        for name in (
+            "rent_currency",
+            "deposit_amount_minor",
+            "service_charge_minor",
+            "payment_due_day",
+            "grace_period_days",
+            "special_covenants",
+        ):
+            if name in data and data[name] is not None:
+                body[name] = data[name]
+        return body
+
+
 class CancellationSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=2000, trim_whitespace=True)
     idempotency_key = serializers.CharField(required=False, allow_blank=True, max_length=200)
@@ -121,6 +168,20 @@ class CancellationSerializer(serializers.Serializer):
     def validate_reason(self, value: str) -> str:
         if not value:
             raise serializers.ValidationError("A cancellation reason is required.")
+        return value
+
+    def validate_idempotency_key(self, value: str) -> str:
+        return value.strip()
+
+
+class AbandonRenewalSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=2000, trim_whitespace=True)
+    organization_id = serializers.UUIDField(required=False, allow_null=True)
+    idempotency_key = serializers.CharField(required=False, allow_blank=True, max_length=200)
+
+    def validate_reason(self, value: str) -> str:
+        if not value:
+            raise serializers.ValidationError("A reason is required.")
         return value
 
     def validate_idempotency_key(self, value: str) -> str:
@@ -191,6 +252,7 @@ class LeaseDetailSerializer(LeaseListSerializer):
             "document_version",
             "contract_data_hash",
             "rendered_document_hash",
+            "supersedes_lease_id",
             "actual_termination_date",
             "signed_at",
             "activated_at",

@@ -1,9 +1,10 @@
-"""Lease draft, approval, cancellation, reservation expiry, signing, activation, and termination.
+"""Lease draft, approval, cancellation, renewal, expiry, signing, activation, and termination.
 
 These functions do not mint property grants and do not mount an HTTP route.
 Occupancy conflicts are pre-checked under row locks. The GiST exclusion
 constraint remains the backstop. Cancellation drops a draft or an unsigned
 reservation out of that exclusion without rewriting contractual fields.
+Renewal creates a new draft and does not rewrite the signed digest.
 Signing stores evidence and reaches fully_executed only. Activation starts
 occupancy. Termination keeps the signed digest and never extends the reserved
 interval. Executed leases are terminated, not cancelled.
@@ -726,6 +727,268 @@ def _may_cancel(actor, lease: Lease) -> bool:
         except OrganizationError:
             continue
     return False
+
+
+_CLOSED_RENEWAL = (LeaseStatus.CANCELLED, LeaseStatus.EXPIRED_UNSIGNED)
+
+
+def _live_renewals(lease: Lease):
+    return lease.renewed_by.exclude(status__in=_CLOSED_RENEWAL)
+
+
+def _authorize_renewal(actor, lease: Lease, organization_id) -> None:
+    """Direct owners, or the current managing preparer. Membership is not title."""
+
+    if organization_id is not None and organization_id != lease.managing_organization_id:
+        raise TenancyError(PERMISSION_DENIED, status_code=403)
+    if organization_id is None:
+        try:
+            verify_owner_authority(actor, lease.property)
+        except OperationsError as exc:
+            raise TenancyError(PERMISSION_DENIED, status_code=403) from exc
+        return
+    authority = resolve_lease_write_authority(
+        actor,
+        lease.property,
+        permission=Permission.LEASES_PREPARE,
+        organization_id=organization_id,
+    )
+    if lease.management_agreement_id != getattr(authority.management_agreement, "id", None):
+        raise TenancyError(PERMISSION_DENIED, status_code=403)
+    if lease.property_owner_id != authority.property_owner.id:
+        raise TenancyError(PERMISSION_DENIED, status_code=403)
+
+
+def _snapshot_contract(lease: Lease) -> dict[str, Any]:
+    return {
+        "contract_data_hash": lease.contract_data_hash,
+        "rent_amount_minor": lease.rent_amount_minor,
+        "term_end_date": lease.term_end_date,
+        "effective_end_date": lease.effective_end_date,
+        "document_version": lease.document_version,
+        "start_date": lease.start_date,
+    }
+
+
+def _contract_unchanged(lease: Lease, snapshot: dict[str, Any]) -> bool:
+    return all(getattr(lease, field) == value for field, value in snapshot.items())
+
+
+def initiate_lease_renewal(
+    *,
+    actor,
+    lease_id,
+    payload: dict[str, Any],
+    idempotency_key: str | None = None,
+    organization_id=None,
+) -> Lease:
+    """Open a new draft that supersedes an active lease.
+
+    The predecessor status becomes under_renewal. Its rent, dates, document
+    version, and contract digest stay as signed. The new row starts at
+    document version 1 and does not reserve occupancy until it is approved.
+    """
+
+    require_actor(actor)
+    if not isinstance(payload, dict):
+        raise TenancyError("Lease terms are required.", status_code=400)
+    client_key = _clean_client_key(idempotency_key)
+    try:
+        with transaction.atomic():
+            hint = Lease.objects.filter(pk=lease_id).values("property_id").first()
+            if hint is None:
+                raise TenancyError(NOT_FOUND, status_code=404)
+            _lock_property_leases(hint["property_id"])
+            predecessor = _locked_lease(lease_id)
+            _authorize_renewal(actor, predecessor, organization_id)
+            event_key = None
+            if client_key:
+                event_key = tenancy_idempotency_key(
+                    "lease_renewal_initiated", predecessor.id, client_key
+                )
+                existing = TenancyEvent.objects.filter(idempotency_key=event_key).first()
+                if existing is not None:
+                    successor_id = (existing.metadata or {}).get("successor_lease_id")
+                    successor = Lease.objects.filter(
+                        pk=successor_id,
+                        supersedes_lease=predecessor,
+                    ).first()
+                    if successor is None:
+                        raise TenancyError(CONFLICT, status_code=409)
+                    return successor
+            allowed = {LeaseStatus.ACTIVE, LeaseStatus.UNDER_RENEWAL}
+            if predecessor.status not in allowed:
+                raise TenancyError(STATUS_INVALID, status_code=409)
+            if predecessor.effective_end_date is None:
+                raise TenancyError(STATUS_INVALID, status_code=409)
+            if _live_renewals(predecessor).exists():
+                raise TenancyError(
+                    "This lease already has a renewal in progress.",
+                    status_code=409,
+                )
+            snapshot = _snapshot_contract(predecessor)
+            previous = predecessor.status
+            if predecessor.status == LeaseStatus.ACTIVE:
+                predecessor.status = LeaseStatus.UNDER_RENEWAL
+                predecessor.save(update_fields=["status", "updated_at"])
+            terms = _parse_terms(payload)
+            parties = _parse_parties(payload.get("parties"), predecessor.property_owner)
+            successor = Lease(
+                property=predecessor.property,
+                property_owner=predecessor.property_owner,
+                managing_organization=predecessor.managing_organization,
+                management_agreement=predecessor.management_agreement,
+                supersedes_lease=predecessor,
+                status=LeaseStatus.DRAFT,
+                document_version=1,
+                effective_end_date=None,
+                created_by=actor,
+                **terms,
+            )
+            successor.save()
+            created_parties = [
+                LeaseParty.objects.create(
+                    lease=successor,
+                    user=spec["user"],
+                    party_role=spec["party_role"],
+                    has_signature_authority=spec["has_signature_authority"],
+                )
+                for spec in parties
+            ]
+            record_tenancy_event(
+                actor=actor,
+                lease=predecessor,
+                action=TenancyEventAction.LEASE_RENEWAL_INITIATED,
+                object_type="lease",
+                object_id=predecessor.id,
+                idempotency_key=event_key
+                or tenancy_idempotency_key("lease_renewal_initiated", predecessor.id, successor.id),
+                metadata={
+                    "successor_lease_id": str(successor.id),
+                    "previous_status": previous,
+                    "contract_data_hash": snapshot["contract_data_hash"],
+                },
+            )
+            record_tenancy_event(
+                actor=actor,
+                lease=successor,
+                action=TenancyEventAction.LEASE_DRAFTED,
+                object_type="lease",
+                object_id=successor.id,
+                idempotency_key=tenancy_idempotency_key("lease_drafted", successor.id),
+                metadata={
+                    "reference": successor.reference,
+                    "supersedes_lease_id": str(predecessor.id),
+                    "rent_amount_minor": successor.rent_amount_minor,
+                    "start_date": successor.start_date.isoformat(),
+                    "term_end_date": successor.term_end_date.isoformat(),
+                },
+            )
+            for party in created_parties:
+                record_tenancy_event(
+                    actor=actor,
+                    lease=successor,
+                    action=TenancyEventAction.LEASE_PARTY_ADDED,
+                    object_type="lease_party",
+                    object_id=party.id,
+                    idempotency_key=tenancy_idempotency_key(
+                        "lease_party_added", successor.id, party.user_id, party.party_role
+                    ),
+                    metadata={
+                        "party_role": party.party_role,
+                        "user_id": str(party.user_id),
+                        "has_signature_authority": party.has_signature_authority,
+                    },
+                )
+            predecessor.refresh_from_db()
+            if not _contract_unchanged(predecessor, snapshot):
+                raise TenancyError(CONFLICT, status_code=409)
+            if predecessor.status != LeaseStatus.UNDER_RENEWAL:
+                raise TenancyError(CONFLICT, status_code=409)
+            return successor
+    except TenancyError:
+        raise
+    except DjangoValidationError as exc:
+        _raise_validation(exc)
+    except IntegrityError as exc:
+        if "tenancy_lease_exclude_overlapping_contractual_leases" in str(exc):
+            raise TenancyError(OVERLAPPING_RESERVATION, status_code=409) from exc
+        raise TenancyError(CONFLICT, status_code=409) from exc
+    except OperationalError as exc:
+        if is_deadlock(exc):
+            raise TenancyError(CONFLICT, status_code=409) from exc
+        raise
+
+
+def abandon_lease_renewal(
+    *,
+    actor,
+    lease_id,
+    reason: str,
+    idempotency_key: str | None = None,
+    organization_id=None,
+) -> Lease:
+    """Return an under-renewal lease to active when no successor is still open.
+
+    Contractual fields stay as they were. A live renewal draft must be
+    cancelled first. This does not terminate the lease.
+    """
+
+    require_actor(actor)
+    if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 2000:
+        raise TenancyError("A reason is required.", status_code=400)
+    reason = reason.strip()
+    client_key = _clean_client_key(idempotency_key)
+    try:
+        with transaction.atomic():
+            hint = Lease.objects.filter(pk=lease_id).values("property_id").first()
+            if hint is None:
+                raise TenancyError(NOT_FOUND, status_code=404)
+            _lock_property_leases(hint["property_id"])
+            lease = _locked_lease(lease_id)
+            _authorize_renewal(actor, lease, organization_id)
+            event_key = None
+            if client_key:
+                event_key = tenancy_idempotency_key("lease_renewal_abandoned", lease.id, client_key)
+                if TenancyEvent.objects.filter(idempotency_key=event_key).exists():
+                    if lease.status == LeaseStatus.ACTIVE and not _live_renewals(lease).exists():
+                        return lease
+                    raise TenancyError(CONFLICT, status_code=409)
+            if lease.status != LeaseStatus.UNDER_RENEWAL:
+                raise TenancyError(STATUS_INVALID, status_code=409)
+            if _live_renewals(lease).exists():
+                raise TenancyError(
+                    "Cancel the renewal draft before returning the lease to active.",
+                    status_code=409,
+                )
+            snapshot = _snapshot_contract(lease)
+            lease.status = LeaseStatus.ACTIVE
+            lease.save(update_fields=["status", "updated_at"])
+            record_tenancy_event(
+                actor=actor,
+                lease=lease,
+                action=TenancyEventAction.LEASE_RENEWAL_ABANDONED,
+                object_type="lease",
+                object_id=lease.id,
+                idempotency_key=event_key
+                or tenancy_idempotency_key("lease_renewal_abandoned", lease.id, reason),
+                metadata={
+                    "reason": reason,
+                    "contract_data_hash": snapshot["contract_data_hash"],
+                },
+            )
+            lease.refresh_from_db()
+            if not _contract_unchanged(lease, snapshot) or lease.status != LeaseStatus.ACTIVE:
+                raise TenancyError(CONFLICT, status_code=409)
+            return lease
+    except TenancyError:
+        raise
+    except DjangoValidationError as exc:
+        _raise_validation(exc)
+    except OperationalError as exc:
+        if is_deadlock(exc):
+            raise TenancyError(CONFLICT, status_code=409) from exc
+        raise
 
 
 def request_lease_termination(

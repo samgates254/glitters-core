@@ -23,6 +23,8 @@ A lease the caller cannot see returns 404. Anonymous calls return 401. Signature
 | GET | `/api/v1/tenancy/leases/<id>/terms/` | Contractual terms |
 | POST | `/api/v1/tenancy/leases/<id>/approve/` | `approve_lease_terms` |
 | POST | `/api/v1/tenancy/leases/<id>/cancel/` | `cancel_lease` |
+| POST | `/api/v1/tenancy/leases/<id>/renewals/` | `initiate_lease_renewal` |
+| POST | `/api/v1/tenancy/leases/<id>/renewals/abandon/` | `abandon_lease_renewal` |
 | GET | `/api/v1/tenancy/leases/<id>/signatures/` | Signature status, without network evidence |
 | POST | `/api/v1/tenancy/leases/<id>/sign/` | `sign_lease` |
 | POST | `/api/v1/tenancy/leases/<id>/activate/` | `activate_lease` |
@@ -37,12 +39,16 @@ There is no submitted state between draft and pending signature. Approval is the
 
 The occupancy summary is the authorized contract for a later geospatial reader. It does not change God's Eye.
 
-Migration `0005_lease_termination_requested` adds the `lease_termination_requested` audit action. Migration `0006_lease_cancelled` adds the `lease_cancelled` audit action. Neither migration changes lease columns or the occupancy exclusion constraint.
+Migration `0005_lease_termination_requested` adds the `lease_termination_requested` audit action. Migration `0006_lease_cancelled` adds the `lease_cancelled` audit action. Migration `0007_lease_renewal_abandoned` adds the `lease_renewal_abandoned` audit action. None of these migrations change lease columns or the occupancy exclusion constraint.
 
 ## Cancellation
 
 Cancellation is allowed from `draft` and `pending_signature`. It changes status only. Rent, the contract digest, and the stored reservation end stay as they were. A cancelled reservation leaves the occupancy exclusion, so a later approval of another lease can use those dates. Executed leases cannot be cancelled. A party, or a repeated client key held by someone who cannot cancel, does not cancel the lease.
 
+## Renewal
+
+Renewal is a new lease row with `supersedes_lease` set. The predecessor moves from `active` to `under_renewal`. Its rent, dates, document version, and contract digest stay as signed. The successor starts at document version 1 and does not reserve occupancy until approval. Approval still runs the overlap check, so a successor that overlaps the predecessor is rejected while that reservation stands. Abandoning a renewal returns the predecessor to `active` only after every open successor has been cancelled. It does not terminate the predecessor.
+
 ## Not in this branch
 
-Renewal, open-ended periodic reservation, rendered-document storage, rental ledgers, and the tenancy portal remain separate follow-on work. Renewal must not rewrite a signed digest in place.
+Open-ended periodic reservation, rendered-document storage, rental ledgers, and the tenancy portal remain separate follow-on work.

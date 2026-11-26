@@ -22,12 +22,14 @@ from apps.tenancy.domain import NOT_FOUND, LeaseStatus, PartySignatureStatus
 from apps.tenancy.errors import TenancyError, raise_for_tenancy
 from apps.tenancy.models import Lease, TenancyEvent
 from apps.tenancy.serializers import (
+    AbandonRenewalSerializer,
     CancellationSerializer,
     DraftLeaseSerializer,
     LeaseDetailSerializer,
     LeaseListSerializer,
     LeasePartySerializer,
     RenderedDocumentSerializer,
+    RenewalLeaseSerializer,
     SignatureEvidenceSerializer,
     SignLeaseSerializer,
     TenancyEventSerializer,
@@ -35,10 +37,12 @@ from apps.tenancy.serializers import (
 )
 from apps.tenancy.services.audit import tenancy_idempotency_key
 from apps.tenancy.services.leases import (
+    abandon_lease_renewal,
     activate_lease,
     approve_lease_terms,
     cancel_lease,
     create_draft_lease,
+    initiate_lease_renewal,
     request_lease_termination,
     sign_lease,
     terminate_lease,
@@ -265,6 +269,51 @@ class LeaseCancelView(APIView):
             lease_id=lease_id,
             reason=data["reason"],
             idempotency_key=data.get("idempotency_key") or None,
+        )
+        return Response(LeaseDetailSerializer(lease).data)
+
+
+class LeaseRenewalView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, lease_id):
+        _lease_or_404(request.user, lease_id)
+        serializer = RenewalLeaseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        idempotency_key = data.get("idempotency_key") or None
+        existed = False
+        if idempotency_key:
+            event_key = tenancy_idempotency_key(
+                "lease_renewal_initiated", lease_id, idempotency_key
+            )
+            existed = TenancyEvent.objects.filter(idempotency_key=event_key).exists()
+        successor = _call(
+            initiate_lease_renewal,
+            actor=request.user,
+            lease_id=lease_id,
+            payload=serializer.payload(),
+            idempotency_key=idempotency_key,
+            organization_id=data.get("organization_id"),
+        )
+        return Response(LeaseDetailSerializer(successor).data, status=200 if existed else 201)
+
+
+class LeaseRenewalAbandonView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, lease_id):
+        _lease_or_404(request.user, lease_id)
+        serializer = AbandonRenewalSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        lease = _call(
+            abandon_lease_renewal,
+            actor=request.user,
+            lease_id=lease_id,
+            reason=data["reason"],
+            idempotency_key=data.get("idempotency_key") or None,
+            organization_id=data.get("organization_id"),
         )
         return Response(LeaseDetailSerializer(lease).data)
 

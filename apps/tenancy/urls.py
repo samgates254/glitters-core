@@ -11,6 +11,8 @@ from apps.tenancy.views import (
     LeaseDocumentView,
     LeaseHistoryView,
     LeasePartyListView,
+    LeaseRenewalAbandonView,
+    LeaseRenewalView,
     LeaseReservationView,
     LeaseSignatureView,
     LeaseTerminateView,
@@ -28,6 +30,12 @@ urlpatterns = [
     path("leases/<uuid:lease_id>/terms/", LeaseTermsView.as_view(), name="lease-terms"),
     path("leases/<uuid:lease_id>/approve/", LeaseApproveView.as_view(), name="lease-approve"),
     path("leases/<uuid:lease_id>/cancel/", LeaseCancelView.as_view(), name="lease-cancel"),
+    path("leases/<uuid:lease_id>/renewals/", LeaseRenewalView.as_view(), name="lease-renewal"),
+    path(
+        "leases/<uuid:lease_id>/renewals/abandon/",
+        LeaseRenewalAbandonView.as_view(),
+        name="lease-renewal-abandon",
+    ),
     path(
         "leases/<uuid:lease_id>/signatures/",
         LeaseSignatureView.as_view(),
