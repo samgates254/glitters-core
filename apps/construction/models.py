@@ -7,6 +7,7 @@ from django.db import models
 
 from apps.construction.domain import (
     BoQStatus,
+    BudgetStatus,
     DefectStatus,
     DrawingStatus,
     InspectionStatus,
@@ -24,6 +25,76 @@ class AppendOnlyQuerySet(models.QuerySet):
 
     def delete(self):
         raise ValueError("Construction audit events are append-only.")
+
+
+class LockedBoQQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        if "status" in kwargs or not set(kwargs).issubset(
+            {"subtotal", "tax_amount", "contingency_amount", "grand_total"}
+        ):
+            raise ValueError("BoQ changes must use construction workflow services.")
+        if self.exclude(status=BoQStatus.DRAFT).exists():
+            raise ValueError("Submitted BoQs cannot be changed outside the workflow services.")
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self.exclude(status=BoQStatus.DRAFT).exists():
+            raise ValueError("Submitted BoQs cannot be deleted.")
+        return super().delete()
+
+
+class LockedBoQContentQuerySet(models.QuerySet):
+    def _locked_exists(self):
+        return (
+            self.filter(
+                section__boq__status__in=[
+                    BoQStatus.SUBMITTED,
+                    BoQStatus.REVIEWED,
+                    BoQStatus.APPROVED,
+                    BoQStatus.SUPERSEDED,
+                ]
+            ).exists()
+            if self.model is BoQItem
+            else self.filter(
+                boq__status__in=[
+                    BoQStatus.SUBMITTED,
+                    BoQStatus.REVIEWED,
+                    BoQStatus.APPROVED,
+                    BoQStatus.SUPERSEDED,
+                ]
+            ).exists()
+        )
+
+    def update(self, **kwargs):
+        if self._locked_exists():
+            raise ValueError("Approved and superseded BoQ content is immutable.")
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self._locked_exists():
+            raise ValueError("Approved and superseded BoQ content cannot be deleted.")
+        return super().delete()
+
+
+class BudgetCategoryQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        if not set(kwargs).issubset({"committed_amount", "actual_amount"}):
+            if self.exclude(budget__status=BudgetStatus.DRAFT).exists():
+                raise ValueError("Submitted and approved budget categories are immutable.")
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self.exclude(budget__status=BudgetStatus.DRAFT).exists():
+            raise ValueError("Submitted and approved budget categories cannot be deleted.")
+        return super().delete()
+
+
+class ImmutableCostRecordQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValueError("Cost records are immutable; create a correcting record instead.")
+
+    def delete(self):
+        raise ValueError("Cost records are immutable; create a correcting record instead.")
 
 
 class ConstructionProject(models.Model):
@@ -440,10 +511,16 @@ class SiteDiary(models.Model):
 
 
 class BoQ(models.Model):
+    objects = LockedBoQQuerySet.as_manager()
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.ForeignKey(ConstructionProject, on_delete=models.PROTECT, related_name="boqs")
+    reference = models.CharField(max_length=32, blank=True, default="")
     title = models.CharField(max_length=200)
     revision = models.PositiveIntegerField(default=1)
+    revision_of = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.PROTECT, related_name="revisions"
+    )
     status = models.CharField(max_length=16, choices=BoQStatus.CHOICES, default=BoQStatus.DRAFT)
     currency = models.CharField(max_length=3, default="KES")
     tax_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
@@ -459,12 +536,33 @@ class BoQ(models.Model):
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+"
     )
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
                 fields=["project", "title", "revision"], name="construction_boq_revision_unique"
+            ),
+            models.UniqueConstraint(
+                fields=["project", "reference", "revision"],
+                condition=~models.Q(reference=""),
+                name="construction_boq_ref_revision_unique",
             ),
             models.CheckConstraint(
                 condition=models.Q(status__in=sorted(BoQStatus.VALUES)),
@@ -476,10 +574,65 @@ class BoQ(models.Model):
             ),
         ]
 
+    def save(self, *args, **kwargs):
+        if self.pk:
+            previous = BoQ.objects.filter(pk=self.pk).first()
+            if previous:
+                allowed_fields = {
+                    (BoQStatus.SUBMITTED, BoQStatus.REVIEWED): {
+                        "status",
+                        "reviewed_by",
+                        "reviewed_at",
+                    },
+                    (BoQStatus.REVIEWED, BoQStatus.APPROVED): {
+                        "status",
+                        "approved_by",
+                        "approved_at",
+                    },
+                    (BoQStatus.APPROVED, BoQStatus.SUPERSEDED): {"status"},
+                }.get((previous.status, self.status))
+                if previous.status != BoQStatus.DRAFT and (
+                    not allowed_fields
+                    or not self._same_snapshot(previous)
+                    or set(kwargs.get("update_fields") or ()) != allowed_fields
+                ):
+                    raise ValueError("Submitted and approved BoQ content is immutable.")
+        super().save(*args, **kwargs)
+
+    def _same_snapshot(self, previous):
+        immutable = (
+            "project_id",
+            "title",
+            "reference",
+            "revision",
+            "revision_of_id",
+            "currency",
+            "tax_percent",
+            "contingency_percent",
+            "subtotal",
+            "tax_amount",
+            "contingency_amount",
+            "grand_total",
+            "created_by_id",
+            "submitted_by_id",
+            "submitted_at",
+        )
+        return all(getattr(self, field) == getattr(previous, field) for field in immutable)
+
+    def delete(self, *args, **kwargs):
+        if self.status != BoQStatus.DRAFT:
+            raise ValueError("Submitted and historical BoQs cannot be deleted.")
+        return super().delete(*args, **kwargs)
+
 
 class BoQSection(models.Model):
+    objects = LockedBoQContentQuerySet.as_manager()
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     boq = models.ForeignKey(BoQ, on_delete=models.CASCADE, related_name="sections")
+    parent = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.PROTECT, related_name="subsections"
+    )
     code = models.CharField(max_length=32)
     title = models.CharField(max_length=200)
     sequence = models.PositiveIntegerField(default=1)
@@ -491,8 +644,27 @@ class BoQSection(models.Model):
             )
         ]
 
+    def save(self, *args, **kwargs):
+        locked = BoQ.objects.filter(pk=self.boq_id).exclude(status=BoQStatus.DRAFT).exists()
+        if self.pk:
+            old = BoQSection.objects.filter(pk=self.pk).values("boq_id").first()
+            locked = locked or bool(
+                old
+                and BoQ.objects.filter(pk=old["boq_id"]).exclude(status=BoQStatus.DRAFT).exists()
+            )
+        if locked:
+            raise ValueError("Approved and superseded BoQ sections are immutable.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if BoQ.objects.filter(pk=self.boq_id).exclude(status=BoQStatus.DRAFT).exists():
+            raise ValueError("Submitted and historical BoQ sections cannot be deleted.")
+        return super().delete(*args, **kwargs)
+
 
 class BoQItem(models.Model):
+    objects = LockedBoQContentQuerySet.as_manager()
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     section = models.ForeignKey(BoQSection, on_delete=models.CASCADE, related_name="items")
     item_code = models.CharField(max_length=32)
@@ -515,6 +687,37 @@ class BoQItem(models.Model):
             ),
         ]
 
+    def save(self, *args, **kwargs):
+        locked = (
+            BoQ.objects.filter(
+                sections__pk=self.section_id,
+            )
+            .exclude(status=BoQStatus.DRAFT)
+            .exists()
+        )
+        if self.pk:
+            old = BoQItem.objects.filter(pk=self.pk).values("section__boq_id").first()
+            locked = locked or bool(
+                old
+                and BoQ.objects.filter(pk=old["section__boq_id"])
+                .exclude(status=BoQStatus.DRAFT)
+                .exists()
+            )
+        if locked:
+            raise ValueError("Approved and superseded BoQ items are immutable.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if (
+            BoQ.objects.filter(
+                sections__pk=self.section_id,
+            )
+            .exclude(status=BoQStatus.DRAFT)
+            .exists()
+        ):
+            raise ValueError("Submitted and historical BoQ items cannot be deleted.")
+        return super().delete(*args, **kwargs)
+
 
 class ProjectBudget(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -523,8 +726,22 @@ class ProjectBudget(models.Model):
     )
     name = models.CharField(max_length=200)
     revision = models.PositiveIntegerField(default=1)
+    revision_of = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.PROTECT, related_name="revisions"
+    )
+    currency = models.CharField(max_length=3, default="KES")
+    status = models.CharField(
+        max_length=16, choices=BudgetStatus.CHOICES, default=BudgetStatus.DRAFT
+    )
     total = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     approved_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+"
     )
@@ -538,10 +755,57 @@ class ProjectBudget(models.Model):
             models.CheckConstraint(
                 condition=models.Q(total__gte=0), name="construction_budget_total_nonnegative"
             ),
+            models.CheckConstraint(
+                condition=models.Q(status__in=sorted(BudgetStatus.VALUES)),
+                name="construction_budget_status_valid",
+            ),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            previous = ProjectBudget.objects.filter(pk=self.pk).first()
+            if previous and previous.status != BudgetStatus.DRAFT:
+                lifecycle_fields = {
+                    (BudgetStatus.SUBMITTED, BudgetStatus.APPROVED): {
+                        "status",
+                        "approved_at",
+                        "approved_by",
+                    },
+                    (BudgetStatus.APPROVED, BudgetStatus.SUPERSEDED): {"status"},
+                }.get((previous.status, self.status))
+                snapshot_fields = (
+                    "project_id",
+                    "name",
+                    "revision",
+                    "revision_of_id",
+                    "currency",
+                    "total",
+                    "approved_at",
+                    "approved_by_id",
+                    "created_by_id",
+                )
+                if (
+                    not lifecycle_fields
+                    or set(kwargs.get("update_fields") or ()) != lifecycle_fields
+                    or any(
+                        getattr(previous, field) != getattr(self, field)
+                        for field in snapshot_fields
+                        if field not in {"approved_at", "approved_by_id"}
+                        or self.status == BudgetStatus.SUPERSEDED
+                    )
+                ):
+                    raise ValueError("Submitted and approved budgets are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.status != BudgetStatus.DRAFT:
+            raise ValueError("Submitted and historical budgets cannot be deleted.")
+        return super().delete(*args, **kwargs)
 
 
 class BudgetCategory(models.Model):
+    objects = BudgetCategoryQuerySet.as_manager()
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     budget = models.ForeignKey(ProjectBudget, on_delete=models.CASCADE, related_name="categories")
     name = models.CharField(max_length=200)
@@ -559,6 +823,33 @@ class BudgetCategory(models.Model):
             )
         ]
 
+    def save(self, *args, **kwargs):
+        if (
+            ProjectBudget.objects.filter(pk=self.budget_id)
+            .exclude(status=BudgetStatus.DRAFT)
+            .exists()
+        ):
+            raise ValueError("Categories in a submitted or approved budget are immutable.")
+        if self.pk:
+            old = BudgetCategory.objects.filter(pk=self.pk).values("budget_id").first()
+            if (
+                old
+                and ProjectBudget.objects.filter(pk=old["budget_id"])
+                .exclude(status=BudgetStatus.DRAFT)
+                .exists()
+            ):
+                raise ValueError("Categories in a submitted or approved budget are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if (
+            ProjectBudget.objects.filter(pk=self.budget_id)
+            .exclude(status=BudgetStatus.DRAFT)
+            .exists()
+        ):
+            raise ValueError("Categories in a submitted or approved budget cannot be deleted.")
+        return super().delete(*args, **kwargs)
+
 
 class ApprovedVariation(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -570,6 +861,23 @@ class ApprovedVariation(models.Model):
     scope_modification = models.TextField()
     cost_impact = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     time_impact_days = models.IntegerField(default=0)
+    budget_category = models.ForeignKey(
+        BudgetCategory,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="variations",
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    rejected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, default="")
     status = models.CharField(
         max_length=16, choices=VariationStatus.CHOICES, default=VariationStatus.REQUESTED
     )
@@ -591,7 +899,64 @@ class ApprovedVariation(models.Model):
                 condition=models.Q(status__in=sorted(VariationStatus.VALUES)),
                 name="construction_variation_status_valid",
             ),
+            models.CheckConstraint(
+                condition=models.Q(time_impact_days__gte=0),
+                name="construction_variation_time_nonnegative",
+            ),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            previous = ApprovedVariation.objects.filter(pk=self.pk).first()
+            if previous:
+                lifecycle_fields = {
+                    (VariationStatus.REQUESTED, VariationStatus.REVIEW): {
+                        "status",
+                        "submitted_at",
+                    },
+                    (VariationStatus.REVIEW, VariationStatus.APPROVED): {
+                        "status",
+                        "approved_by",
+                        "approved_at",
+                    },
+                    (VariationStatus.REQUESTED, VariationStatus.REJECTED): {
+                        "status",
+                        "rejected_by",
+                        "rejected_at",
+                        "rejection_reason",
+                    },
+                    (VariationStatus.REVIEW, VariationStatus.REJECTED): {
+                        "status",
+                        "rejected_by",
+                        "rejected_at",
+                        "rejection_reason",
+                    },
+                }.get((previous.status, self.status))
+                snapshot_fields = (
+                    "project_id",
+                    "reference",
+                    "reason",
+                    "scope_modification",
+                    "cost_impact",
+                    "time_impact_days",
+                    "budget_category_id",
+                    "requested_by_id",
+                )
+                if (
+                    not lifecycle_fields
+                    or set(kwargs.get("update_fields") or ()) != lifecycle_fields
+                    or any(
+                        getattr(previous, field) != getattr(self, field)
+                        for field in snapshot_fields
+                    )
+                ):
+                    raise ValueError("Submitted and approved variations are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.status in (VariationStatus.APPROVED, VariationStatus.REJECTED):
+            raise ValueError("Reviewed variations cannot be deleted.")
+        return super().delete(*args, **kwargs)
 
 
 class ContractorAssignment(models.Model):
@@ -747,6 +1112,8 @@ class WorkOrder(models.Model):
 
 
 class CostRecord(models.Model):
+    objects = ImmutableCostRecordQuerySet.as_manager()
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.ForeignKey(
         ConstructionProject, on_delete=models.PROTECT, related_name="cost_records"
@@ -772,7 +1139,21 @@ class CostRecord(models.Model):
             models.CheckConstraint(
                 condition=models.Q(amount__gte=0), name="construction_cost_amount_nonnegative"
             ),
+            models.UniqueConstraint(
+                fields=["project", "record_type", "reference"],
+                name="construction_cost_reference_unique",
+            ),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.pk and CostRecord.objects.filter(pk=self.pk).exists():
+            raise ValueError("Cost records are immutable; create a correcting record instead.")
+        if self.category.budget.project_id != self.project_id:
+            raise ValueError("Cost record and category must belong to the same project.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError("Cost records are immutable; create a correcting record instead.")
 
 
 class ProjectHandover(models.Model):

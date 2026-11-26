@@ -2,15 +2,28 @@ from django.urls import path
 
 from apps.construction.views import (
     BoQCollectionView,
+    BoQExportView,
+    BoQItemCollectionView,
+    BoQItemDetailView,
+    BoQRevisionView,
+    BoQSectionCollectionView,
+    BoQWorkflowView,
+    BudgetCategoryCollectionView,
+    BudgetCollectionView,
+    BudgetWorkflowView,
+    CostRecordCollectionView,
     InspectionCollectionView,
     MilestoneCollectionView,
     ProjectCollectionView,
+    ProjectCostReportView,
     ProjectDetailView,
     ProjectReportView,
     ProjectTransitionView,
     SiteDiaryApprovalView,
     SiteDiaryCollectionView,
     TechnicalDocumentDownloadView,
+    VariationCollectionView,
+    VariationWorkflowView,
 )
 
 urlpatterns = [
@@ -31,6 +44,71 @@ urlpatterns = [
         name="construction-inspections",
     ),
     path("projects/<uuid:project_id>/boqs/", BoQCollectionView.as_view(), name="construction-boqs"),
+    path(
+        "projects/<uuid:project_id>/boqs/<uuid:boq_id>/sections/",
+        BoQSectionCollectionView.as_view(),
+        name="construction-boq-sections",
+    ),
+    path(
+        "projects/<uuid:project_id>/boqs/<uuid:boq_id>/sections/<uuid:section_id>/items/",
+        BoQItemCollectionView.as_view(),
+        name="construction-boq-items",
+    ),
+    path(
+        "projects/<uuid:project_id>/boqs/<uuid:boq_id>/sections/<uuid:section_id>/items/<uuid:item_id>/",
+        BoQItemDetailView.as_view(),
+        name="construction-boq-item-detail",
+    ),
+    path(
+        "projects/<uuid:project_id>/boqs/<uuid:boq_id>/revisions/",
+        BoQRevisionView.as_view(),
+        name="construction-boq-revisions",
+    ),
+    path(
+        "projects/<uuid:project_id>/boqs/<uuid:boq_id>/export/",
+        BoQExportView.as_view(),
+        name="construction-boq-export",
+    ),
+    path(
+        "projects/<uuid:project_id>/boqs/<uuid:boq_id>/<str:action>/",
+        BoQWorkflowView.as_view(),
+        name="construction-boq-workflow",
+    ),
+    path(
+        "projects/<uuid:project_id>/budgets/",
+        BudgetCollectionView.as_view(),
+        name="construction-budgets",
+    ),
+    path(
+        "projects/<uuid:project_id>/budgets/<uuid:budget_id>/categories/",
+        BudgetCategoryCollectionView.as_view(),
+        name="construction-budget-categories",
+    ),
+    path(
+        "projects/<uuid:project_id>/budgets/<uuid:budget_id>/costs/",
+        CostRecordCollectionView.as_view(),
+        name="construction-budget-costs",
+    ),
+    path(
+        "projects/<uuid:project_id>/budgets/<uuid:budget_id>/<str:action>/",
+        BudgetWorkflowView.as_view(),
+        name="construction-budget-workflow",
+    ),
+    path(
+        "projects/<uuid:project_id>/variations/",
+        VariationCollectionView.as_view(),
+        name="construction-variations",
+    ),
+    path(
+        "projects/<uuid:project_id>/variations/<uuid:variation_id>/<str:action>/",
+        VariationWorkflowView.as_view(),
+        name="construction-variation-workflow",
+    ),
+    path(
+        "projects/<uuid:project_id>/cost-report/",
+        ProjectCostReportView.as_view(),
+        name="construction-cost-report",
+    ),
     path(
         "projects/<uuid:project_id>/milestones/",
         MilestoneCollectionView.as_view(),
