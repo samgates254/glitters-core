@@ -22,6 +22,7 @@ from apps.tenancy.domain import NOT_FOUND, LeaseStatus, PartySignatureStatus
 from apps.tenancy.errors import TenancyError, raise_for_tenancy
 from apps.tenancy.models import Lease, TenancyEvent
 from apps.tenancy.serializers import (
+    CancellationSerializer,
     DraftLeaseSerializer,
     LeaseDetailSerializer,
     LeaseListSerializer,
@@ -36,6 +37,7 @@ from apps.tenancy.services.audit import tenancy_idempotency_key
 from apps.tenancy.services.leases import (
     activate_lease,
     approve_lease_terms,
+    cancel_lease,
     create_draft_lease,
     request_lease_termination,
     sign_lease,
@@ -246,6 +248,24 @@ class LeaseActivateView(APIView):
     def post(self, request, lease_id):
         _lease_or_404(request.user, lease_id)
         lease = _call(activate_lease, actor=request.user, lease_id=lease_id)
+        return Response(LeaseDetailSerializer(lease).data)
+
+
+class LeaseCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, lease_id):
+        _lease_or_404(request.user, lease_id)
+        serializer = CancellationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        lease = _call(
+            cancel_lease,
+            actor=request.user,
+            lease_id=lease_id,
+            reason=data["reason"],
+            idempotency_key=data.get("idempotency_key") or None,
+        )
         return Response(LeaseDetailSerializer(lease).data)
 
 

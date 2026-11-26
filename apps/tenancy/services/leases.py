@@ -1,10 +1,12 @@
-"""Lease draft, approval, reservation expiry, signing, activation, and termination.
+"""Lease draft, approval, cancellation, reservation expiry, signing, activation, and termination.
 
 These functions do not mint property grants and do not mount an HTTP route.
 Occupancy conflicts are pre-checked under row locks. The GiST exclusion
-constraint remains the backstop. Signing stores evidence and reaches
-fully_executed only. Activation starts occupancy. Termination keeps the
-signed digest and never extends the reserved interval.
+constraint remains the backstop. Cancellation drops a draft or an unsigned
+reservation out of that exclusion without rewriting contractual fields.
+Signing stores evidence and reaches fully_executed only. Activation starts
+occupancy. Termination keeps the signed digest and never extends the reserved
+interval. Executed leases are terminated, not cancelled.
 """
 
 from __future__ import annotations
@@ -24,7 +26,10 @@ from apps.identity.models import User
 from apps.operations.domain import PhysicalState, physical_state_transition_allowed
 from apps.operations.errors import OperationsError
 from apps.operations.models import UnitPhysicalProfile
-from apps.operations.services.agreements import verify_lease_execution_authority
+from apps.operations.services.agreements import (
+    verify_lease_execution_authority,
+    verify_owner_authority,
+)
 from apps.operations.services.physical_profiles import update_physical_profile
 from apps.organizations.domain import Permission
 from apps.organizations.errors import OrganizationError
@@ -629,6 +634,98 @@ def terminate_lease(
         if is_deadlock(exc):
             raise TenancyError(CONFLICT, status_code=409) from exc
         raise
+
+
+def cancel_lease(
+    *,
+    actor,
+    lease_id,
+    reason: str,
+    idempotency_key: str | None = None,
+) -> Lease:
+    """Cancel a draft or an unsigned reservation without rewriting its terms.
+
+    Executed leases cannot be cancelled. Pending contractual fields stay as
+    approved. A repeated client key returns the cancelled lease.
+    """
+
+    require_actor(actor)
+    if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 2000:
+        raise TenancyError("A cancellation reason is required.", status_code=400)
+    reason = reason.strip()
+    client_key = _clean_client_key(idempotency_key)
+    try:
+        with transaction.atomic():
+            hint = Lease.objects.filter(pk=lease_id).values("property_id").first()
+            if hint is None:
+                raise TenancyError(NOT_FOUND, status_code=404)
+            _lock_property_leases(hint["property_id"])
+            lease = _locked_lease(lease_id)
+            if not _may_cancel(actor, lease):
+                raise TenancyError(PERMISSION_DENIED, status_code=403)
+            event_key = None
+            if client_key:
+                event_key = tenancy_idempotency_key("lease_cancelled", lease.id, client_key)
+                if TenancyEvent.objects.filter(idempotency_key=event_key).exists():
+                    return lease
+            cancellable = {LeaseStatus.DRAFT, LeaseStatus.PENDING_SIGNATURE}
+            if lease.status not in cancellable:
+                raise TenancyError(STATUS_INVALID, status_code=409)
+            previous = lease.status
+            preserved_hash = lease.contract_data_hash
+            preserved_rent = lease.rent_amount_minor
+            preserved_end = lease.effective_end_date
+            lease.status = LeaseStatus.CANCELLED
+            lease.save(update_fields=["status", "updated_at"])
+            record_tenancy_event(
+                actor=actor,
+                lease=lease,
+                action=TenancyEventAction.LEASE_CANCELLED,
+                object_type="lease",
+                object_id=lease.id,
+                idempotency_key=event_key
+                or tenancy_idempotency_key("lease_cancelled", lease.id, previous),
+                metadata={
+                    "previous_status": previous,
+                    "reason": reason,
+                    "contract_data_hash": preserved_hash,
+                },
+            )
+            lease.refresh_from_db()
+            if (
+                lease.contract_data_hash != preserved_hash
+                or lease.rent_amount_minor != preserved_rent
+                or lease.effective_end_date != preserved_end
+            ):
+                raise TenancyError(CONFLICT, status_code=409)
+            return lease
+    except TenancyError:
+        raise
+    except DjangoValidationError as exc:
+        _raise_validation(exc)
+    except OperationalError as exc:
+        if is_deadlock(exc):
+            raise TenancyError(CONFLICT, status_code=409) from exc
+        raise
+
+
+def _may_cancel(actor, lease: Lease) -> bool:
+    if lease.property_owner_id == actor.id or lease.created_by_id == actor.id:
+        return True
+    try:
+        verify_owner_authority(actor, lease.property)
+        return True
+    except OperationsError:
+        pass
+    if lease.managing_organization_id is None:
+        return False
+    for permission in (Permission.LEASES_PREPARE, Permission.LEASES_APPROVE):
+        try:
+            authorize(actor, lease.managing_organization_id, permission)
+            return True
+        except OrganizationError:
+            continue
+    return False
 
 
 def request_lease_termination(

@@ -114,6 +114,19 @@ class SignLeaseSerializer(serializers.Serializer):
         return decode_rendered_document(self.validated_data["rendered_document_base64"])
 
 
+class CancellationSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=2000, trim_whitespace=True)
+    idempotency_key = serializers.CharField(required=False, allow_blank=True, max_length=200)
+
+    def validate_reason(self, value: str) -> str:
+        if not value:
+            raise serializers.ValidationError("A cancellation reason is required.")
+        return value
+
+    def validate_idempotency_key(self, value: str) -> str:
+        return value.strip()
+
+
 class TerminationSerializer(serializers.Serializer):
     termination_date = serializers.DateField()
     reason = serializers.CharField(max_length=2000, trim_whitespace=True)

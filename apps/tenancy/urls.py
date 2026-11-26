@@ -5,6 +5,7 @@ from django.urls import path
 from apps.tenancy.views import (
     LeaseActivateView,
     LeaseApproveView,
+    LeaseCancelView,
     LeaseCollectionView,
     LeaseDetailView,
     LeaseDocumentView,
@@ -26,6 +27,7 @@ urlpatterns = [
     path("leases/<uuid:lease_id>/parties/", LeasePartyListView.as_view(), name="lease-parties"),
     path("leases/<uuid:lease_id>/terms/", LeaseTermsView.as_view(), name="lease-terms"),
     path("leases/<uuid:lease_id>/approve/", LeaseApproveView.as_view(), name="lease-approve"),
+    path("leases/<uuid:lease_id>/cancel/", LeaseCancelView.as_view(), name="lease-cancel"),
     path(
         "leases/<uuid:lease_id>/signatures/",
         LeaseSignatureView.as_view(),

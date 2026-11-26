@@ -352,6 +352,7 @@ class TenancyEventAction:
     LEASE_AMENDED = "lease_amended"
     LEASE_TERMINATED = "lease_terminated"
     LEASE_TERMINATION_REQUESTED = "lease_termination_requested"
+    LEASE_CANCELLED = "lease_cancelled"
     LEASE_RESERVATION_EXPIRED = "lease_reservation_expired"
     RENT_SCHEDULE_GENERATED = "rent_schedule_generated"
     RENT_SCHEDULE_CANCELLED = "rent_schedule_cancelled"
@@ -377,6 +378,7 @@ class TenancyEventAction:
         (LEASE_AMENDED, "Lease Amended"),
         (LEASE_TERMINATED, "Lease Terminated"),
         (LEASE_TERMINATION_REQUESTED, "Lease Termination Requested"),
+        (LEASE_CANCELLED, "Lease Cancelled"),
         (LEASE_RESERVATION_EXPIRED, "Lease Reservation Expired"),
         (RENT_SCHEDULE_GENERATED, "Rent Schedule Generated"),
         (RENT_SCHEDULE_CANCELLED, "Rent Schedule Cancelled"),
