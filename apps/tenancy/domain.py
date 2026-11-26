@@ -104,6 +104,14 @@ class LeaseType:
     VALUES = frozenset(val for val, _ in CHOICES)
 
 
+PERIODIC_LEASE_TYPES = frozenset(
+    {
+        LeaseType.RESIDENTIAL_PERIODIC,
+        LeaseType.COMMERCIAL_PERIODIC,
+    }
+)
+
+
 class LeaseStatus:
     DRAFT = "draft"
     PENDING_SIGNATURE = "pending_signature"

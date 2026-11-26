@@ -43,6 +43,7 @@ from apps.tenancy.domain import (
     NOT_FOUND,
     NOT_READY_FOR_MOVE_IN,
     OVERLAPPING_RESERVATION,
+    PERIODIC_LEASE_TYPES,
     PERMISSION_DENIED,
     SIGNATURE_DEADLINE_EXPIRED,
     STATUS_INVALID,
@@ -164,7 +165,7 @@ def create_draft_lease(
                     "rent_amount_minor": lease.rent_amount_minor,
                     "rent_currency": lease.rent_currency,
                     "start_date": lease.start_date.isoformat(),
-                    "term_end_date": lease.term_end_date.isoformat(),
+                    "term_end_date": _date_text(lease.term_end_date),
                 },
             )
             for party in created:
@@ -236,7 +237,7 @@ def approve_lease_terms(
                 raise TenancyError(STATUS_INVALID, status_code=409)
             parties = list(lease.parties.select_related("user"))
             _require_approvable_terms(lease, parties)
-            exclusive_end = lease.term_end_date + timedelta(days=1)
+            exclusive_end = _reservation_end(lease)
             if _reservation_conflict(lease, lease.start_date, exclusive_end):
                 raise TenancyError(OVERLAPPING_RESERVATION, status_code=409)
             payload = contract_payload_for_lease(lease, parties)
@@ -265,7 +266,7 @@ def approve_lease_terms(
                     "contract_data_hash": lease.contract_data_hash,
                     "rendered_document_hash": lease.rendered_document_hash,
                     "signature_deadline": lease.signature_deadline.isoformat(),
-                    "effective_end_date": lease.effective_end_date.isoformat(),
+                    "effective_end_date": _date_text(lease.effective_end_date),
                 },
             )
             return lease
@@ -819,8 +820,6 @@ def initiate_lease_renewal(
             allowed = {LeaseStatus.ACTIVE, LeaseStatus.UNDER_RENEWAL}
             if predecessor.status not in allowed:
                 raise TenancyError(STATUS_INVALID, status_code=409)
-            if predecessor.effective_end_date is None:
-                raise TenancyError(STATUS_INVALID, status_code=409)
             if _live_renewals(predecessor).exists():
                 raise TenancyError(
                     "This lease already has a renewal in progress.",
@@ -881,7 +880,7 @@ def initiate_lease_renewal(
                     "supersedes_lease_id": str(predecessor.id),
                     "rent_amount_minor": successor.rent_amount_minor,
                     "start_date": successor.start_date.isoformat(),
-                    "term_end_date": successor.term_end_date.isoformat(),
+                    "term_end_date": _date_text(successor.term_end_date),
                 },
             )
             for party in created_parties:
@@ -1149,7 +1148,11 @@ def _assert_approval_authority(actor, lease: Lease) -> None:
 
 
 def _require_approvable_terms(lease: Lease, parties: list[LeaseParty]) -> None:
-    if lease.term_end_date is None or lease.term_end_date < lease.start_date:
+    periodic = lease.lease_type in PERIODIC_LEASE_TYPES
+    if lease.term_end_date is None:
+        if not periodic:
+            raise TenancyError("A bounded term end date is required.", status_code=400)
+    elif lease.term_end_date < lease.start_date:
         raise TenancyError("A bounded term end date is required.", status_code=400)
     if lease.rent_amount_minor <= 0:
         raise TenancyError("Rent must be a positive number of minor units.", status_code=400)
@@ -1190,7 +1193,21 @@ def _require_approvable_terms(lease: Lease, parties: list[LeaseParty]) -> None:
             raise TenancyError("An authorized occupant cannot sign the lease.", status_code=400)
 
 
-def _reservation_conflict(lease: Lease, start: date, exclusive_end: date) -> bool:
+def _reservation_end(lease: Lease) -> date | None:
+    """Exclusive occupancy end. A periodic lease with no term end stays open."""
+
+    if lease.term_end_date is None:
+        return None
+    return lease.term_end_date + timedelta(days=1)
+
+
+def _date_text(value: date | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _reservation_conflict(lease: Lease, start: date, exclusive_end: date | None) -> bool:
     others = Lease.objects.filter(
         property_id=lease.property_id,
         status__in=LeaseStatus.OCCUPANCY_RESERVING,
@@ -1385,9 +1402,19 @@ def _parse_terms(payload: dict[str, Any]) -> dict[str, Any]:
     if lease_type not in LeaseType.VALUES:
         raise TenancyError("The lease type is invalid.", status_code=400)
     start = _as_date(payload.get("start_date"), "The start date")
-    term_end = _as_date(payload.get("term_end_date"), "The term end date")
-    if term_end < start:
-        raise TenancyError("The term end date cannot be before the start date.", status_code=400)
+    raw_end = payload.get("term_end_date", None)
+    periodic = lease_type in PERIODIC_LEASE_TYPES
+    if raw_end in (None, ""):
+        if not periodic:
+            raise TenancyError("The term end date must be a date.", status_code=400)
+        term_end = None
+    else:
+        term_end = _as_date(raw_end, "The term end date")
+        if term_end < start:
+            raise TenancyError(
+                "The term end date cannot be before the start date.",
+                status_code=400,
+            )
     currency = str(payload.get("rent_currency") or "KES").strip().upper()
     if not _CURRENCY.fullmatch(currency):
         raise TenancyError("Rent currency must be three letters.", status_code=400)

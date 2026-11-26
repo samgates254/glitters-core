@@ -394,6 +394,10 @@ class LeaseReservationView(APIView):
                 "effective_end_date": lease.effective_end_date,
                 "signature_deadline": lease.signature_deadline,
                 "occupancy_reserving": lease.status in LeaseStatus.OCCUPANCY_RESERVING,
+                "open_ended": (
+                    lease.effective_end_date is None
+                    and lease.status in LeaseStatus.OCCUPANCY_RESERVING
+                ),
             }
         )
 

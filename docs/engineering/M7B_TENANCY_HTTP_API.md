@@ -49,6 +49,10 @@ Cancellation is allowed from `draft` and `pending_signature`. It changes status 
 
 Renewal is a new lease row with `supersedes_lease` set. The predecessor moves from `active` to `under_renewal`. Its rent, dates, document version, and contract digest stay as signed. The successor starts at document version 1 and does not reserve occupancy until approval. Approval still runs the overlap check, so a successor that overlaps the predecessor is rejected while that reservation stands. Abandoning a renewal returns the predecessor to `active` only after every open successor has been cancelled. It does not terminate the predecessor.
 
+## Open-ended periodic reservation
+
+A residential or commercial periodic lease may omit `term_end_date`. Approval reserves occupancy with a null exclusive end. PostgreSQL stores that as an unbounded half-open range, so the existing GiST exclusion still rejects a later lease on the same property. A finite reservation cannot be moved later or cleared. Termination sets the exclusive end to the day after the termination date and leaves the contract digest and null term end unchanged. The released dates can then be reserved.
+
 ## Not in this branch
 
-Open-ended periodic reservation, rendered-document storage, rental ledgers, and the tenancy portal remain separate follow-on work.
+Rendered-document storage, rental ledgers, and the tenancy portal remain separate follow-on work.

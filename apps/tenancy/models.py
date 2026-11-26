@@ -172,6 +172,17 @@ def _reject_lease_status_changes(current_statuses, proposed: str) -> None:
             raise ValidationError(STATUS_INVALID)
 
 
+def _reject_extended_reservations(rows, proposed) -> None:
+    """A finite occupancy end can move earlier. It cannot move later or disappear."""
+
+    for row in rows:
+        if row["status"] not in LeaseStatus.EXECUTED:
+            continue
+        old_end = row["effective_end_date"]
+        if old_end is not None and (proposed is None or proposed > old_end):
+            raise ValidationError("The occupancy reservation cannot be extended.")
+
+
 def _reject_pending_contract_writes(statuses, fields: set[str]) -> None:
     """Block contractual rewrites after terms are approved and before execution."""
 
@@ -208,6 +219,11 @@ class LeaseQuerySet(models.QuerySet):
                 "executed leases. Formal contractual variations must use LeaseAmendment."
             )
         _reject_pending_contract_writes(current_statuses, normalized)
+        if "effective_end_date" in normalized:
+            _reject_extended_reservations(
+                self.values("status", "effective_end_date"),
+                kwargs.get("effective_end_date"),
+            )
         return super().update(**kwargs)
 
     def bulk_update(self, objs, fields, **kwargs):
@@ -216,15 +232,16 @@ class LeaseQuerySet(models.QuerySet):
         attempted_pending = normalized.intersection(PENDING_RESERVATION_FIELDS)
         if attempted_immutable or attempted_pending or "status" in fields:
             current = {
-                row["id"]: row["status"]
+                row["id"]: row
                 for row in Lease.objects.filter(pk__in=[obj.pk for obj in objs if obj.pk]).values(
-                    "id", "status"
+                    "id", "status", "effective_end_date"
                 )
             }
             for obj in objs:
-                previous = current.get(obj.pk)
-                if previous is None:
+                stored = current.get(obj.pk)
+                if stored is None:
                     continue
+                previous = stored["status"]
                 if "status" in fields and not lease_transition_allowed(previous, obj.status):
                     raise ValidationError(STATUS_INVALID)
                 if attempted_immutable and previous in LeaseStatus.EXECUTED:
@@ -242,6 +259,8 @@ class LeaseQuerySet(models.QuerySet):
                         "Direct bulk_update of contractual fields "
                         f"[{label}] is prohibited once lease terms are approved."
                     )
+                if "effective_end_date" in normalized:
+                    _reject_extended_reservations([stored], obj.effective_end_date)
         return super().bulk_update(objs, fields, **kwargs)
 
     def bulk_create(self, objs, *args, **kwargs):
@@ -499,6 +518,15 @@ class Lease(models.Model):
                                 f"Contractual field '{field}' is immutable on executed lease {self.reference}. "
                                 f"Formal contractual variations must use LeaseAmendment."
                             )
+                    _reject_extended_reservations(
+                        [
+                            {
+                                "status": orig_status,
+                                "effective_end_date": original["effective_end_date"],
+                            }
+                        ],
+                        self.effective_end_date,
+                    )
                 elif orig_status == LeaseStatus.PENDING_SIGNATURE:
                     frozen = IMMUTABLE_CONTRACT_FIELDS | PENDING_RESERVATION_FIELDS
                     for field in frozen:

@@ -11,11 +11,30 @@ import binascii
 
 from rest_framework import serializers
 
-from apps.tenancy.domain import LeasePartyRole, LeaseStatus, LeaseType, SignatureMethod
+from apps.tenancy.domain import (
+    PERIODIC_LEASE_TYPES,
+    LeasePartyRole,
+    LeaseStatus,
+    LeaseType,
+    SignatureMethod,
+)
 from apps.tenancy.models import Lease, LeaseParty, LeaseSignatureEvidence, TenancyEvent
 from apps.tenancy.services.leases import MAX_RENDERED_BYTES
 
 _MAX_DOCUMENT_TEXT = ((MAX_RENDERED_BYTES + 2) // 3) * 4
+
+
+def _validate_term_end(attrs: dict) -> dict:
+    term_end = attrs.get("term_end_date")
+    periodic = attrs.get("lease_type") in PERIODIC_LEASE_TYPES
+    if term_end is None and not periodic:
+        raise serializers.ValidationError({"term_end_date": "A fixed lease needs a term end date."})
+    start = attrs.get("start_date")
+    if term_end is not None and start is not None and term_end < start:
+        raise serializers.ValidationError(
+            {"term_end_date": "The term end date cannot be before the start date."}
+        )
+    return attrs
 
 
 def decode_rendered_document(value: str) -> bytes:
@@ -48,7 +67,7 @@ class DraftLeaseSerializer(serializers.Serializer):
     idempotency_key = serializers.CharField(required=False, allow_blank=True, max_length=200)
     lease_type = serializers.ChoiceField(choices=LeaseType.CHOICES)
     start_date = serializers.DateField()
-    term_end_date = serializers.DateField()
+    term_end_date = serializers.DateField(required=False, allow_null=True)
     rent_amount_minor = serializers.IntegerField(min_value=1)
     rent_currency = serializers.CharField(required=False, min_length=3, max_length=3)
     deposit_amount_minor = serializers.IntegerField(required=False, min_value=0)
@@ -59,6 +78,10 @@ class DraftLeaseSerializer(serializers.Serializer):
     parties = PartyInputSerializer(many=True)
     application_id = serializers.UUIDField(required=False, allow_null=True)
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        return _validate_term_end(attrs)
+
     def validate_idempotency_key(self, value: str) -> str:
         return value.strip()
 
@@ -67,7 +90,7 @@ class DraftLeaseSerializer(serializers.Serializer):
         body = {
             "lease_type": data["lease_type"],
             "start_date": data["start_date"],
-            "term_end_date": data["term_end_date"],
+            "term_end_date": data.get("term_end_date"),
             "rent_amount_minor": data["rent_amount_minor"],
             "parties": [
                 {
@@ -119,7 +142,7 @@ class RenewalLeaseSerializer(serializers.Serializer):
     idempotency_key = serializers.CharField(required=False, allow_blank=True, max_length=200)
     lease_type = serializers.ChoiceField(choices=LeaseType.CHOICES)
     start_date = serializers.DateField()
-    term_end_date = serializers.DateField()
+    term_end_date = serializers.DateField(required=False, allow_null=True)
     rent_amount_minor = serializers.IntegerField(min_value=1)
     rent_currency = serializers.CharField(required=False, min_length=3, max_length=3)
     deposit_amount_minor = serializers.IntegerField(required=False, min_value=0)
@@ -129,6 +152,10 @@ class RenewalLeaseSerializer(serializers.Serializer):
     special_covenants = serializers.CharField(required=False, allow_blank=True, max_length=20_000)
     parties = PartyInputSerializer(many=True)
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        return _validate_term_end(attrs)
+
     def validate_idempotency_key(self, value: str) -> str:
         return value.strip()
 
@@ -137,7 +164,7 @@ class RenewalLeaseSerializer(serializers.Serializer):
         body = {
             "lease_type": data["lease_type"],
             "start_date": data["start_date"],
-            "term_end_date": data["term_end_date"],
+            "term_end_date": data.get("term_end_date"),
             "rent_amount_minor": data["rent_amount_minor"],
             "parties": [
                 {
