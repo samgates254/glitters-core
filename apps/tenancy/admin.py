@@ -4,15 +4,20 @@ from django.contrib import admin
 
 from apps.tenancy.domain import LeaseStatus
 from apps.tenancy.models import (
+    IMMUTABLE_CONTRACT_FIELDS,
     DepositDeduction,
     DepositObligation,
+    DepositReceipt,
     HandoverProtocol,
-    IMMUTABLE_CONTRACT_FIELDS,
     Lease,
     LeaseAmendment,
     LeaseParty,
     LeaseSignatureEvidence,
     RentalApplication,
+    RentalLedgerEntry,
+    RentAllocation,
+    RentInvoice,
+    RentInvoiceLine,
     RentScheduleEntry,
     TenancyEvent,
 )
@@ -139,3 +144,31 @@ class TenancyEventAdmin(ReadOnlyAdmin):
     list_display = ("action", "object_type", "object_id", "actor", "lease", "created_at")
     list_filter = ("action", "object_type")
     search_fields = ("idempotency_key", "object_id", "lease__reference")
+
+
+@admin.register(RentInvoice)
+class RentInvoiceAdmin(ReadOnlyAdmin):
+    list_display = ("lease", "due_date", "total_minor", "currency", "issued_at")
+    search_fields = ("lease__reference",)
+
+
+@admin.register(RentInvoiceLine)
+class RentInvoiceLineAdmin(ReadOnlyAdmin):
+    list_display = ("invoice", "schedule_entry", "amount_minor")
+
+
+@admin.register(RentAllocation)
+class RentAllocationAdmin(ReadOnlyAdmin):
+    list_display = ("invoice", "amount_minor", "allocated_on", "reversal_of", "created_at")
+
+
+@admin.register(DepositReceipt)
+class DepositReceiptAdmin(ReadOnlyAdmin):
+    list_display = ("deposit_obligation", "amount_minor", "received_on", "reversal_of")
+
+
+@admin.register(RentalLedgerEntry)
+class RentalLedgerEntryAdmin(ReadOnlyAdmin):
+    list_display = ("lease", "entry_type", "amount_minor", "currency", "created_at")
+    list_filter = ("entry_type",)
+    search_fields = ("lease__reference", "object_id")

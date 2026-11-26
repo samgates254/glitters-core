@@ -268,6 +268,29 @@ class ScheduleStatus:
     VALUES = frozenset(val for val, _ in CHOICES)
 
 
+class LedgerEntryType:
+    """Append-only rental ledger kinds. These are bookkeeping rows, not card charges."""
+
+    SCHEDULE_GENERATED = "schedule_generated"
+    INVOICE_ISSUED = "invoice_issued"
+    ALLOCATION_RECORDED = "allocation_recorded"
+    ALLOCATION_REVERSED = "allocation_reversed"
+    DEPOSIT_OBLIGATION_RECORDED = "deposit_obligation_recorded"
+    DEPOSIT_RECEIPT_RECORDED = "deposit_receipt_recorded"
+    DEPOSIT_RECEIPT_REVERSED = "deposit_receipt_reversed"
+
+    CHOICES = (
+        (SCHEDULE_GENERATED, "Schedule Generated"),
+        (INVOICE_ISSUED, "Invoice Issued"),
+        (ALLOCATION_RECORDED, "Allocation Recorded"),
+        (ALLOCATION_REVERSED, "Allocation Reversed"),
+        (DEPOSIT_OBLIGATION_RECORDED, "Deposit Obligation Recorded"),
+        (DEPOSIT_RECEIPT_RECORDED, "Deposit Receipt Recorded"),
+        (DEPOSIT_RECEIPT_REVERSED, "Deposit Receipt Reversed"),
+    )
+    VALUES = frozenset(val for val, _ in CHOICES)
+
+
 class DepositStatus:
     HELD_PENDING = "held_pending"
     PARTIALLY_DEDUCTED = "partially_deducted"

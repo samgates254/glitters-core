@@ -28,6 +28,7 @@ from apps.tenancy.domain import (
     LeasePartyRole,
     LeaseStatus,
     LeaseType,
+    LedgerEntryType,
     PartySignatureStatus,
     ScheduleStatus,
     SignatureMethod,
@@ -851,6 +852,10 @@ class RentScheduleEntry(models.Model):
                 fields=["lease", "sequence_number"],
                 name="tenancy_rent_schedule_seq_unique",
             ),
+            models.UniqueConstraint(
+                fields=["lease", "period_start"],
+                name="tenancy_rent_schedule_period_unique",
+            ),
             models.CheckConstraint(
                 condition=models.Q(period_end__gte=models.F("period_start")),
                 name="tenancy_rent_schedule_period_valid",
@@ -1146,3 +1151,243 @@ class StoredLeaseDocument(models.Model):
     @property
     def locator(self) -> str:
         return f"tenancy://leases/{self.lease_id}/documents/{self.document_version}"
+
+
+class FinanceAppendOnlyQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValidationError("Rental finance rows are append-only.")
+
+    def delete(self):
+        raise ValidationError("Rental finance rows are append-only.")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ValidationError("Rental finance rows are append-only.")
+
+
+class FinanceAppendOnlyModel(models.Model):
+    """Insert-only money rows. Corrections are new reversal rows."""
+
+    objects = FinanceAppendOnlyQuerySet.as_manager()
+
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError("Rental finance rows are append-only.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Rental finance rows are append-only.")
+
+
+class RentInvoice(FinanceAppendOnlyModel):
+    """One issued demand for a single schedule entry. Amounts are minor units."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lease = models.ForeignKey(
+        Lease,
+        on_delete=models.PROTECT,
+        related_name="rent_invoices",
+    )
+    due_date = models.DateField()
+    total_minor = models.BigIntegerField()
+    currency = models.CharField(max_length=3)
+    idempotency_key = models.CharField(max_length=64, unique=True)
+    batch_hash = models.CharField(max_length=64, blank=True, default="")
+    selector = models.CharField(max_length=64, blank=True, default="")
+    issued_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="issued_rent_invoices",
+    )
+    issued_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "tenancy_rent_invoice"
+        ordering = ["due_date", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(total_minor__gt=0),
+                name="tenancy_invoice_total_positive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["lease", "due_date"], name="tenancy_invoice_due_idx"),
+            models.Index(fields=["lease", "batch_hash"], name="tenancy_invoice_batch_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"Invoice {self.total_minor} {self.currency} due {self.due_date}"
+
+
+class RentInvoiceLine(FinanceAppendOnlyModel):
+    """The one schedule entry this invoice bills."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice = models.ForeignKey(
+        RentInvoice,
+        on_delete=models.PROTECT,
+        related_name="lines",
+    )
+    schedule_entry = models.OneToOneField(
+        RentScheduleEntry,
+        on_delete=models.PROTECT,
+        related_name="invoice_line",
+    )
+    base_rent_minor = models.BigIntegerField()
+    service_charge_minor = models.BigIntegerField()
+    amount_minor = models.BigIntegerField()
+
+    class Meta:
+        db_table = "tenancy_rent_invoice_line"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(base_rent_minor__gt=0),
+                name="tenancy_invoice_line_base_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(service_charge_minor__gte=0),
+                name="tenancy_invoice_line_service_non_neg",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    amount_minor=models.F("base_rent_minor") + models.F("service_charge_minor")
+                ),
+                name="tenancy_invoice_line_amount_matches",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Line {self.amount_minor} for {self.schedule_entry_id}"
+
+
+class RentAllocation(FinanceAppendOnlyModel):
+    """Landlord bookkeeping against an invoice. This does not charge a card."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice = models.ForeignKey(
+        RentInvoice,
+        on_delete=models.PROTECT,
+        related_name="allocations",
+    )
+    amount_minor = models.BigIntegerField()
+    allocated_on = models.DateField()
+    memo = models.CharField(max_length=200, blank=True, default="")
+    reversal_of = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="reversals",
+    )
+    idempotency_key = models.CharField(max_length=64, unique=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="rent_allocations",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "tenancy_rent_allocation"
+        ordering = ["allocated_on", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount_minor__gt=0),
+                name="tenancy_allocation_amount_positive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["invoice", "created_at"], name="tenancy_allocation_invoice_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"Allocation {self.amount_minor} on {self.allocated_on}"
+
+
+class DepositReceipt(FinanceAppendOnlyModel):
+    """Recorded deposit cash. This does not move funds through a payment provider."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deposit_obligation = models.ForeignKey(
+        DepositObligation,
+        on_delete=models.PROTECT,
+        related_name="receipts",
+    )
+    amount_minor = models.BigIntegerField()
+    received_on = models.DateField()
+    memo = models.CharField(max_length=200, blank=True, default="")
+    reversal_of = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="reversals",
+    )
+    idempotency_key = models.CharField(max_length=64, unique=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="deposit_receipts",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "tenancy_deposit_receipt"
+        ordering = ["received_on", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount_minor__gt=0),
+                name="tenancy_deposit_receipt_amount_positive",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Deposit receipt {self.amount_minor} on {self.received_on}"
+
+
+class RentalLedgerEntry(FinanceAppendOnlyModel):
+    """Audit row for a rental-finance change. Balances are computed from invoices."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lease = models.ForeignKey(
+        Lease,
+        on_delete=models.PROTECT,
+        related_name="rental_ledger",
+    )
+    entry_type = models.CharField(max_length=40, choices=LedgerEntryType.CHOICES)
+    amount_minor = models.BigIntegerField()
+    currency = models.CharField(max_length=3)
+    object_type = models.CharField(max_length=64)
+    object_id = models.CharField(max_length=36)
+    idempotency_key = models.CharField(max_length=64, unique=True)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="rental_ledger_entries",
+    )
+    metadata = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "tenancy_rental_ledger_entry"
+        ordering = ["created_at", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount_minor__gt=0),
+                name="tenancy_ledger_amount_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(entry_type__in=sorted(LedgerEntryType.VALUES)),
+                name="tenancy_ledger_entry_type_valid",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["lease", "created_at"], name="tenancy_ledger_lease_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.entry_type} {self.amount_minor} {self.currency}"

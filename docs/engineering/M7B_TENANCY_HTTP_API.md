@@ -35,6 +35,17 @@ A lease the caller cannot see returns 404. Anonymous calls return 401. Signature
 | GET | `/api/v1/tenancy/leases/<id>/document/content/` | Stored bytes for a visible lease |
 | GET | `/api/v1/tenancy/leases/<id>/reservation/` | Reservation interval |
 | GET | `/api/v1/tenancy/summaries/occupancy/` | Counts only. No tenant, address, or document |
+| GET, POST | `/api/v1/tenancy/leases/<id>/billing/schedule/` | Monthly rent obligations |
+| GET, POST | `/api/v1/tenancy/leases/<id>/billing/invoices/` | Invoices for scheduled rent |
+| POST | `/api/v1/tenancy/leases/<id>/billing/invoices/<invoice>/allocations/` | Book an allocation |
+| POST | `/api/v1/tenancy/leases/<id>/billing/allocations/<allocation>/reversals/` | Reverse an allocation |
+| GET, POST | `/api/v1/tenancy/leases/<id>/billing/deposit/` | Deposit obligation |
+| POST | `/api/v1/tenancy/leases/<id>/billing/deposit/receipts/` | Record a deposit receipt |
+| POST | `/api/v1/tenancy/leases/<id>/billing/deposit/receipts/<receipt>/reversals/` | Reverse a receipt |
+| GET | `/api/v1/tenancy/leases/<id>/billing/arrears/?as_of=` | Overdue invoice balances |
+| GET | `/api/v1/tenancy/leases/<id>/billing/statements/tenant/?as_of=` | Tenant statement |
+| GET | `/api/v1/tenancy/leases/<id>/billing/statements/landlord/?as_of=` | Landlord statement |
+| GET | `/api/v1/tenancy/leases/<id>/billing/ledger/` | Append-only finance audit |
 
 There is no submitted state between draft and pending signature. Approval is the submission. A termination request records an event and does not change the lease. Execution is the terminate route.
 
@@ -58,6 +69,14 @@ A residential or commercial periodic lease may omit `term_end_date`. Approval re
 
 Approval stores the exact rendered bytes on the server, one row per lease document version. The stored locator is `tenancy://leases/<id>/documents/<version>`. A client-supplied URI is not the retrieval path. `GET .../document/` returns version and hashes. `GET .../document/content/` returns the bytes only when the caller can see the lease and the stored SHA-256 matches both the row and the lease. A mismatch returns 409 and no document body. Click-to-sign remains an audit record, not a PDF/A seal.
 
+## Rental finance
+
+Billing is a separate service from the lease state machine. It does not approve, sign, activate, terminate, or cancel a lease. Amounts are integer minor units. There is no payment provider, webhook, or payout.
+
+A schedule is one row per calendar month from the start date through the term end. An open-ended lease requires `through_date`. One call adds at most 36 new months. A later call continues the sequence and does not duplicate a period. The due date is the lease `payment_due_day`, clamped into the period. Partial months are billed at the full monthly amount. Grace days do not delay arrears.
+
+An invoice has one line and one schedule entry. Allocations and deposit receipts are append-only. A reversal is a new row. Net paid is normal allocations minus reversals. The invoice row is locked so two allocations cannot exceed the balance. Arrears are positive balances whose due date is on or before `as_of`. Statements are queries. A tenant can read the tenant statement. The landlord statement and the ledger require the direct owner or a preparer on the active management agreement. A hidden lease is 404. These rows are bookkeeping, not a card charge.
+
 ## Not in this branch
 
-Rental ledgers and the tenancy portal remain separate follow-on work.
+The tenancy portal and production payment collection remain separate follow-on work.

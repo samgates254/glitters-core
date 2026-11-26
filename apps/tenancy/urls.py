@@ -2,6 +2,19 @@
 
 from django.urls import path
 
+from apps.tenancy.billing_views import (
+    DepositObligationView,
+    DepositReceiptReversalView,
+    DepositReceiptView,
+    LandlordStatementView,
+    RentalLedgerView,
+    RentAllocationReversalView,
+    RentAllocationView,
+    RentArrearsView,
+    RentInvoiceView,
+    RentScheduleView,
+    TenantStatementView,
+)
 from apps.tenancy.views import (
     LeaseActivateView,
     LeaseApproveView,
@@ -67,4 +80,59 @@ urlpatterns = [
         name="lease-reservation",
     ),
     path("summaries/occupancy/", OccupancySummaryView.as_view(), name="occupancy-summary"),
+    path(
+        "leases/<uuid:lease_id>/billing/schedule/",
+        RentScheduleView.as_view(),
+        name="lease-billing-schedule",
+    ),
+    path(
+        "leases/<uuid:lease_id>/billing/invoices/",
+        RentInvoiceView.as_view(),
+        name="lease-billing-invoices",
+    ),
+    path(
+        "leases/<uuid:lease_id>/billing/invoices/<uuid:invoice_id>/allocations/",
+        RentAllocationView.as_view(),
+        name="lease-billing-allocation",
+    ),
+    path(
+        "leases/<uuid:lease_id>/billing/allocations/<uuid:allocation_id>/reversals/",
+        RentAllocationReversalView.as_view(),
+        name="lease-billing-allocation-reversal",
+    ),
+    path(
+        "leases/<uuid:lease_id>/billing/deposit/",
+        DepositObligationView.as_view(),
+        name="lease-billing-deposit",
+    ),
+    path(
+        "leases/<uuid:lease_id>/billing/deposit/receipts/",
+        DepositReceiptView.as_view(),
+        name="lease-billing-deposit-receipt",
+    ),
+    path(
+        "leases/<uuid:lease_id>/billing/deposit/receipts/<uuid:receipt_id>/reversals/",
+        DepositReceiptReversalView.as_view(),
+        name="lease-billing-deposit-reversal",
+    ),
+    path(
+        "leases/<uuid:lease_id>/billing/arrears/",
+        RentArrearsView.as_view(),
+        name="lease-billing-arrears",
+    ),
+    path(
+        "leases/<uuid:lease_id>/billing/statements/tenant/",
+        TenantStatementView.as_view(),
+        name="lease-billing-tenant-statement",
+    ),
+    path(
+        "leases/<uuid:lease_id>/billing/statements/landlord/",
+        LandlordStatementView.as_view(),
+        name="lease-billing-landlord-statement",
+    ),
+    path(
+        "leases/<uuid:lease_id>/billing/ledger/",
+        RentalLedgerView.as_view(),
+        name="lease-billing-ledger",
+    ),
 ]
