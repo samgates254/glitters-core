@@ -1,8 +1,10 @@
-"""Lease draft, approval, and reservation expiry.
+"""Lease draft, approval, reservation expiry, signing, activation, and termination.
 
-Signing and termination are separate. These functions do not mint property
-grants and do not mount an HTTP route. Occupancy conflicts are pre-checked
-under row locks. The GiST exclusion constraint remains the backstop.
+These functions do not mint property grants and do not mount an HTTP route.
+Occupancy conflicts are pre-checked under row locks. The GiST exclusion
+constraint remains the backstop. Signing stores evidence and reaches
+fully_executed only. Activation starts occupancy. Termination keeps the
+signed digest and never extends the reserved interval.
 """
 
 from __future__ import annotations
@@ -13,27 +15,51 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_ipv46_address
 from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
 
 from apps.identity.domain import AccountStatus
 from apps.identity.models import User
+from apps.operations.domain import PhysicalState, physical_state_transition_allowed
+from apps.operations.errors import OperationsError
+from apps.operations.models import UnitPhysicalProfile
+from apps.operations.services.agreements import verify_lease_execution_authority
+from apps.operations.services.physical_profiles import update_physical_profile
 from apps.organizations.domain import Permission
 from apps.properties.models import Property
 from apps.properties.services.locking import is_deadlock, lock_properties
 from apps.tenancy.domain import (
+    ALREADY_SIGNED,
     CONFLICT,
     NOT_FOUND,
+    NOT_READY_FOR_MOVE_IN,
     OVERLAPPING_RESERVATION,
     PERMISSION_DENIED,
+    SIGNATURE_DEADLINE_EXPIRED,
     STATUS_INVALID,
+    TERMS_HASH_MISMATCH,
+    UNAUTHORIZED_SIGNATORY,
+    HandoverStatus,
+    HandoverType,
     LeasePartyRole,
     LeaseStatus,
     LeaseType,
+    PartySignatureStatus,
+    ScheduleStatus,
+    SignatureMethod,
     TenancyEventAction,
 )
 from apps.tenancy.errors import TenancyError
-from apps.tenancy.models import Lease, LeaseParty, RentalApplication, TenancyEvent
+from apps.tenancy.models import (
+    HandoverProtocol,
+    Lease,
+    LeaseParty,
+    LeaseSignatureEvidence,
+    RentalApplication,
+    RentScheduleEntry,
+    TenancyEvent,
+)
 from apps.tenancy.services.audit import record_tenancy_event, tenancy_idempotency_key
 from apps.tenancy.services.authority import (
     actor_can_maintain_reservations,
@@ -87,9 +113,7 @@ def create_draft_lease(
             _validate_unit(property_record)
             terms = _parse_terms(payload)
             parties = _parse_parties(payload.get("parties"), authority.property_owner)
-            application = _load_application(
-                payload.get("application_id"), property_record, parties
-            )
+            application = _load_application(payload.get("application_id"), property_record, parties)
             lease = Lease(
                 property=property_record,
                 property_owner=authority.property_owner,
@@ -297,6 +321,314 @@ def expire_due_reservations(
     return expired
 
 
+def sign_lease(
+    *,
+    actor,
+    lease_id,
+    party_id,
+    rendered_document: bytes,
+    signature_method: str,
+    ip_address: str | None = None,
+    user_agent: str = "",
+    idempotency_key: str | None = None,
+    now: datetime | None = None,
+) -> LeaseSignatureEvidence:
+    """Record one party's signature. The last required signature executes the lease.
+
+    Execution here means fully_executed. It does not start occupancy.
+    A repeated client key returns the original evidence. A second distinct
+    attempt for the same party and document version is rejected.
+    """
+
+    require_actor(actor)
+    moment = _aware_moment(now)
+    document = _rendered_bytes(rendered_document)
+    method = _signature_method(signature_method)
+    address = _ip_address(ip_address)
+    agent = _user_agent(user_agent)
+    client_key = _clean_client_key(idempotency_key)
+    try:
+        with transaction.atomic():
+            hint = Lease.objects.filter(pk=lease_id).values("property_id").first()
+            if hint is None:
+                raise TenancyError(NOT_FOUND, status_code=404)
+            _lock_property_leases(hint["property_id"])
+            lease = _locked_lease(lease_id)
+            if lease.status != LeaseStatus.PENDING_SIGNATURE:
+                raise TenancyError(STATUS_INVALID, status_code=409)
+            deadline = lease.signature_deadline
+            if deadline is None or moment >= deadline:
+                raise TenancyError(SIGNATURE_DEADLINE_EXPIRED, status_code=409)
+            party = _locked_party(party_id)
+            if party.lease_id != lease.id or party.user_id != actor.id:
+                raise TenancyError(UNAUTHORIZED_SIGNATORY, status_code=403)
+            if (
+                not party.has_signature_authority
+                or party.party_role not in LeasePartyRole.SIGNATORY_ROLES
+            ):
+                raise TenancyError(UNAUTHORIZED_SIGNATORY, status_code=403)
+            parties = list(lease.parties.select_related("user"))
+            payload = contract_payload_for_lease(lease, parties)
+            data_hash = compute_contract_data_hash(payload)
+            rendered_hash = compute_rendered_document_hash(document)
+            if (
+                data_hash != lease.contract_data_hash
+                or rendered_hash != lease.rendered_document_hash
+            ):
+                raise TenancyError(TERMS_HASH_MISMATCH, status_code=409)
+            evidence_key = _signature_key(lease, party, client_key)
+            existing = LeaseSignatureEvidence.objects.filter(
+                lease=lease,
+                party=party,
+                document_version=lease.document_version,
+            ).first()
+            if existing is not None:
+                if client_key and existing.idempotency_key == evidence_key:
+                    return existing
+                raise TenancyError(ALREADY_SIGNED, status_code=409)
+            evidence = LeaseSignatureEvidence(
+                idempotency_key=evidence_key,
+                lease=lease,
+                party=party,
+                signatory_user=actor,
+                signatory_role=party.party_role,
+                document_version=lease.document_version,
+                contract_data_hash=data_hash,
+                rendered_document_hash=rendered_hash,
+                rendered_document_uri=lease.rendered_document_uri,
+                signature_method=method,
+                ip_address=address,
+                user_agent=agent,
+            )
+            evidence.save()
+            party.signature_status = PartySignatureStatus.SIGNED
+            party.signed_at = moment
+            party.save(update_fields=["signature_status", "signed_at", "updated_at"])
+            record_tenancy_event(
+                actor=actor,
+                lease=lease,
+                action=TenancyEventAction.LEASE_PARTY_SIGNED,
+                object_type="lease_signature_evidence",
+                object_id=evidence.id,
+                idempotency_key=tenancy_idempotency_key("event", evidence_key),
+                metadata={
+                    "party_role": party.party_role,
+                    "document_version": lease.document_version,
+                    "contract_data_hash": data_hash,
+                    "rendered_document_hash": rendered_hash,
+                },
+            )
+            _execute_if_complete(lease, moment, actor)
+            return evidence
+    except TenancyError:
+        raise
+    except DjangoValidationError as exc:
+        _raise_validation(exc)
+    except IntegrityError as exc:
+        raise TenancyError(ALREADY_SIGNED, status_code=409) from exc
+    except OperationalError as exc:
+        if is_deadlock(exc):
+            raise TenancyError(CONFLICT, status_code=409) from exc
+        raise
+
+
+def activate_lease(*, actor, lease_id, now: datetime | None = None) -> Lease:
+    """Start occupancy after execution, an executed move-in, and a ready unit."""
+
+    require_actor(actor)
+    moment = _aware_moment(now)
+    try:
+        with transaction.atomic():
+            hint = Lease.objects.filter(pk=lease_id).values("property_id").first()
+            if hint is None:
+                raise TenancyError(NOT_FOUND, status_code=404)
+            _lock_property_leases(hint["property_id"])
+            lease = _locked_lease(lease_id)
+            _require_execution_authority(actor, lease.property)
+            if lease.status != LeaseStatus.FULLY_EXECUTED:
+                raise TenancyError(STATUS_INVALID, status_code=409)
+            ready = HandoverProtocol.objects.filter(
+                lease=lease,
+                protocol_type=HandoverType.MOVE_IN,
+                status=HandoverStatus.EXECUTED,
+            ).exists()
+            profile = UnitPhysicalProfile.objects.filter(property_id=lease.property_id).first()
+            inspected = (
+                profile is not None and profile.physical_state == PhysicalState.READY_INSPECTED
+            )
+            if not ready or not inspected:
+                raise TenancyError(NOT_READY_FOR_MOVE_IN, status_code=409)
+            lease.status = LeaseStatus.ACTIVE
+            lease.activated_at = moment
+            lease.save(update_fields=["status", "activated_at", "updated_at"])
+            update_physical_profile(
+                actor=actor,
+                property_id=lease.property_id,
+                new_state=PhysicalState.OCCUPIED_NORMAL,
+            )
+            record_tenancy_event(
+                actor=actor,
+                lease=lease,
+                action=TenancyEventAction.LEASE_ACTIVATED,
+                object_type="lease",
+                object_id=lease.id,
+                idempotency_key=tenancy_idempotency_key(
+                    "lease_activated", lease.id, lease.document_version
+                ),
+                metadata={"reference": lease.reference, "activated_at": moment.isoformat()},
+            )
+            return lease
+    except TenancyError:
+        raise
+    except OperationsError as exc:
+        raise TenancyError(exc.detail, status_code=exc.status_code) from exc
+    except DjangoValidationError as exc:
+        _raise_validation(exc)
+    except OperationalError as exc:
+        if is_deadlock(exc):
+            raise TenancyError(CONFLICT, status_code=409) from exc
+        raise
+
+
+def terminate_lease(
+    *,
+    actor,
+    lease_id,
+    termination_date: date,
+    reason: str,
+    now: datetime | None = None,
+) -> Lease:
+    """End occupancy without rewriting the signed contract.
+
+    The exclusive occupancy end is the day after the termination date, and
+    it is never moved later than the reservation already stored. Contractual
+    term end, rent, and the contract digest stay as signed.
+    """
+
+    require_actor(actor)
+    moment = _aware_moment(now)
+    if isinstance(termination_date, datetime) or not isinstance(termination_date, date):
+        raise TenancyError("The termination date must be a date.", status_code=400)
+    if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 2000:
+        raise TenancyError("A termination reason is required.", status_code=400)
+    reason = reason.strip()
+    try:
+        with transaction.atomic():
+            hint = Lease.objects.filter(pk=lease_id).values("property_id").first()
+            if hint is None:
+                raise TenancyError(NOT_FOUND, status_code=404)
+            _lock_property_leases(hint["property_id"])
+            lease = _locked_lease(lease_id)
+            _require_execution_authority(actor, lease.property)
+            allowed = {
+                LeaseStatus.FULLY_EXECUTED,
+                LeaseStatus.ACTIVE,
+                LeaseStatus.UNDER_RENEWAL,
+            }
+            if lease.status not in allowed:
+                raise TenancyError(STATUS_INVALID, status_code=409)
+            if termination_date < lease.start_date:
+                raise TenancyError(
+                    "Termination cannot be before the lease start date.",
+                    status_code=400,
+                )
+            if lease.term_end_date is not None and termination_date > lease.term_end_date:
+                raise TenancyError(
+                    "Termination cannot be after the contractual term end.",
+                    status_code=400,
+                )
+            if lease.term_end_date is not None and termination_date == lease.term_end_date:
+                new_status = LeaseStatus.TERMINATED_NORMAL
+            else:
+                new_status = LeaseStatus.TERMINATED_EARLY
+            preserved_term_end = lease.term_end_date
+            preserved_hash = lease.contract_data_hash
+            preserved_rent = lease.rent_amount_minor
+            exclusive_end = termination_date + timedelta(days=1)
+            if lease.effective_end_date is not None and exclusive_end > lease.effective_end_date:
+                exclusive_end = lease.effective_end_date
+            if exclusive_end <= lease.start_date:
+                raise TenancyError(
+                    "Termination does not leave a valid occupancy interval.",
+                    status_code=400,
+                )
+            lease.actual_termination_date = termination_date
+            lease.effective_end_date = exclusive_end
+            lease.terminated_at = moment
+            lease.termination_reason = reason
+            lease.status = new_status
+            lease.save(
+                update_fields=[
+                    "status",
+                    "actual_termination_date",
+                    "effective_end_date",
+                    "terminated_at",
+                    "termination_reason",
+                    "updated_at",
+                ]
+            )
+            cancelled = RentScheduleEntry.objects.filter(
+                lease=lease,
+                status=ScheduleStatus.SCHEDULED,
+                period_start__gte=termination_date,
+            ).update(
+                status=ScheduleStatus.CANCELLED,
+                cancelled_at=moment,
+                cancellation_reason=reason,
+                updated_at=moment,
+            )
+            _release_occupancy(actor, lease.property_id)
+            record_tenancy_event(
+                actor=actor,
+                lease=lease,
+                action=TenancyEventAction.LEASE_TERMINATED,
+                object_type="lease",
+                object_id=lease.id,
+                idempotency_key=tenancy_idempotency_key(
+                    "lease_terminated",
+                    lease.id,
+                    lease.document_version,
+                    termination_date.isoformat(),
+                ),
+                metadata={
+                    "status": new_status,
+                    "termination_date": termination_date.isoformat(),
+                    "effective_end_date": exclusive_end.isoformat(),
+                    "term_end_date": (
+                        preserved_term_end.isoformat() if preserved_term_end else None
+                    ),
+                    "contract_data_hash": preserved_hash,
+                    "rent_amount_minor": preserved_rent,
+                },
+            )
+            if cancelled:
+                record_tenancy_event(
+                    actor=actor,
+                    lease=lease,
+                    action=TenancyEventAction.RENT_SCHEDULE_CANCELLED,
+                    object_type="lease",
+                    object_id=lease.id,
+                    idempotency_key=tenancy_idempotency_key(
+                        "rent_schedule_cancelled",
+                        lease.id,
+                        termination_date.isoformat(),
+                    ),
+                    metadata={"cancelled_count": cancelled},
+                )
+            lease.refresh_from_db()
+            return lease
+    except TenancyError:
+        raise
+    except OperationsError as exc:
+        raise TenancyError(exc.detail, status_code=exc.status_code) from exc
+    except DjangoValidationError as exc:
+        _raise_validation(exc)
+    except OperationalError as exc:
+        if is_deadlock(exc):
+            raise TenancyError(CONFLICT, status_code=409) from exc
+        raise
+
+
 def _expire_property(property_id, moment: datetime, actor) -> int:
     _property_record, leases = _lock_property_leases(property_id)
     return _expire_loaded(leases, moment, actor)
@@ -439,6 +771,101 @@ def _locked_lease(lease_id) -> Lease:
         raise TenancyError(NOT_FOUND, status_code=404) from exc
 
 
+def _locked_party(party_id) -> LeaseParty:
+    try:
+        return LeaseParty.objects.select_for_update(of=("self",)).get(pk=party_id)
+    except LeaseParty.DoesNotExist as exc:
+        raise TenancyError(NOT_FOUND, status_code=404) from exc
+
+
+def _require_execution_authority(actor, property_record) -> None:
+    try:
+        verify_lease_execution_authority(actor, property_record)
+    except OperationsError as exc:
+        raise TenancyError(exc.detail, status_code=exc.status_code) from exc
+
+
+def _execute_if_complete(lease: Lease, moment: datetime, actor) -> None:
+    required = list(lease.parties.filter(has_signature_authority=True).values_list("id", flat=True))
+    signed = set(
+        LeaseSignatureEvidence.objects.filter(
+            lease=lease,
+            document_version=lease.document_version,
+        ).values_list("party_id", flat=True)
+    )
+    if not required or any(party_id not in signed for party_id in required):
+        return
+    lease.status = LeaseStatus.FULLY_EXECUTED
+    lease.signed_at = moment
+    lease.save(update_fields=["status", "signed_at", "updated_at"])
+    record_tenancy_event(
+        actor=actor,
+        lease=lease,
+        action=TenancyEventAction.LEASE_FULLY_EXECUTED,
+        object_type="lease",
+        object_id=lease.id,
+        idempotency_key=tenancy_idempotency_key(
+            "lease_fully_executed", lease.id, lease.document_version
+        ),
+        metadata={
+            "reference": lease.reference,
+            "document_version": lease.document_version,
+            "contract_data_hash": lease.contract_data_hash,
+        },
+    )
+
+
+def _release_occupancy(actor, property_id) -> None:
+    profile = UnitPhysicalProfile.objects.filter(property_id=property_id).first()
+    if profile is None:
+        return
+    if not physical_state_transition_allowed(
+        profile.physical_state, PhysicalState.TURNOVER_PREPARATION
+    ):
+        return
+    update_physical_profile(
+        actor=actor,
+        property_id=property_id,
+        new_state=PhysicalState.TURNOVER_PREPARATION,
+    )
+
+
+def _signature_key(lease: Lease, party: LeaseParty, client_key: str | None) -> str:
+    parts: list[object] = [
+        "lease_party_signed",
+        lease.id,
+        party.id,
+        lease.document_version,
+    ]
+    if client_key:
+        parts.append(client_key)
+    return tenancy_idempotency_key(*parts)
+
+
+def _signature_method(value: str) -> str:
+    if value not in SignatureMethod.VALUES:
+        raise TenancyError("The signature method is invalid.", status_code=400)
+    return value
+
+
+def _ip_address(value: str | None) -> str | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise TenancyError("The signature IP address is invalid.", status_code=400)
+    try:
+        validate_ipv46_address(value)
+    except DjangoValidationError as exc:
+        raise TenancyError("The signature IP address is invalid.", status_code=400) from exc
+    return value
+
+
+def _user_agent(value: str) -> str:
+    if not isinstance(value, str):
+        raise TenancyError("The signature user agent is invalid.", status_code=400)
+    return value[:512]
+
+
 def _lock_one_property(property_id) -> Property:
     try:
         locked = lock_properties(property_id)
@@ -465,7 +892,7 @@ def _replay_draft(actor, client_key: str, property_id):
 def _replay_draft_outside(actor, client_key: str, property_id):
     try:
         property_uuid = Property.objects.filter(pk=property_id).values_list("id", flat=True).first()
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
     if property_uuid is None:
         return None

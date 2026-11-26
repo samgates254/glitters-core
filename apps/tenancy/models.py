@@ -625,8 +625,23 @@ class LeaseParty(models.Model):
         return super().delete(*args, **kwargs)
 
 
+class LeaseSignatureEvidenceQuerySet(models.QuerySet):
+    """Ordinary updates cannot rewrite signature evidence."""
+
+    def update(self, **kwargs):
+        raise ValidationError("LeaseSignatureEvidence records are append-only and immutable.")
+
+    def delete(self):
+        raise ValidationError("LeaseSignatureEvidence records are immutable and cannot be deleted.")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ValidationError("LeaseSignatureEvidence records are append-only and immutable.")
+
+
 class LeaseSignatureEvidence(models.Model):
     """Immutable audit record and cryptographic evidence of digital signature execution."""
+
+    objects = LeaseSignatureEvidenceQuerySet.as_manager()
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     idempotency_key = models.CharField(max_length=64, unique=True)
