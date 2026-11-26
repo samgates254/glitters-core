@@ -22,14 +22,18 @@ from apps.construction.models import (
 from apps.construction.services import (
     add_project_member,
     approve_boq,
+    approve_site_diary,
     award_tender,
     calculate_boq,
     close_defect,
+    close_engineering_issue,
     close_rfi,
     create_boq,
     create_inspection,
     create_project,
+    create_site_diary,
     record_defect,
+    record_engineering_issue,
     respond_rfi,
     revise_boq,
     set_milestone_dependencies,
@@ -206,6 +210,47 @@ def test_rfi_lifecycle_and_api_cross_tenant_isolation():
     client.force_authenticate(user=outsider)
     response = client.get(f"/api/v1/construction/projects/{project.id}/")
     assert response.status_code in (404, 403)
+
+
+@pytest.mark.django_db
+def test_site_diary_and_engineering_issue_workflow():
+    actor = make_actor("site-engineer@example.com")
+    org = make_org(actor, "site")
+    project = create_project(
+        actor=actor,
+        organization=org,
+        code="CP-006",
+        name="Kisumu Bridge",
+        classification="civil",
+        project_manager=actor,
+    )
+    diary = create_site_diary(
+        actor=actor,
+        project=project,
+        diary_date=date.today(),
+        work_completed="Pile cap preparation",
+        weather_and_conditions="Dry",
+        safety_observations="PPE compliance observed",
+    )
+    approved = approve_site_diary(actor=actor, diary=diary)
+    assert approved.approved_at is not None
+
+    issue = record_engineering_issue(
+        actor=actor,
+        project=project,
+        reference="ISS-001",
+        category="quality",
+        severity="high",
+        description="Foundation reinforcement spacing requires review",
+        responsible_party=actor,
+        resolution_deadline=date.today(),
+    )
+    closed = close_engineering_issue(
+        actor=actor,
+        issue=issue,
+        resolution_notes="Reviewed and corrected before pour",
+    )
+    assert closed.status == "closed"
 
 
 @pytest.mark.django_db

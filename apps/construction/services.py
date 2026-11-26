@@ -26,8 +26,11 @@ from apps.construction.models import (
     ConstructionProject,
     Defect,
     EngineeringInspection,
+    EngineeringIssue,
+    ProjectActivity,
     ProjectMember,
     ProjectMilestone,
+    SiteDiary,
     TenderBid,
 )
 from apps.construction.permissions import PROJECT_MANAGEMENT_ROLES, has_org_access, has_project_role
@@ -209,6 +212,100 @@ def close_defect(*, actor, defect):
     return defect
 
 
+@transaction.atomic
+def create_site_diary(*, actor, project, diary_date, **fields):
+    _require_project_role(
+        actor,
+        project,
+        {
+            ProjectRole.PROJECT_MANAGER,
+            ProjectRole.CIVIL_ENGINEER,
+            ProjectRole.SITE_INSPECTOR,
+            ProjectRole.CONTRACTOR,
+        },
+    )
+    diary = SiteDiary.objects.create(
+        project=project,
+        author=actor,
+        diary_date=diary_date,
+        **fields,
+    )
+    audit(project, actor, "site_diary.created", "site_diary", diary.id)
+    return diary
+
+
+@transaction.atomic
+def approve_site_diary(*, actor, diary):
+    _require_project_role(
+        actor,
+        diary.project,
+        {ProjectRole.PROJECT_MANAGER, ProjectRole.CIVIL_ENGINEER},
+    )
+    diary.approved_by = actor
+    diary.approved_at = timezone.now()
+    diary.save(update_fields=["approved_by", "approved_at", "updated_at"])
+    audit(diary.project, actor, "site_diary.approved", "site_diary", diary.id)
+    return diary
+
+
+@transaction.atomic
+def record_engineering_issue(
+    *,
+    actor,
+    project,
+    reference,
+    category,
+    severity,
+    description,
+    responsible_party=None,
+    resolution_deadline=None,
+):
+    _require_project_role(
+        actor,
+        project,
+        {
+            ProjectRole.PROJECT_MANAGER,
+            ProjectRole.CIVIL_ENGINEER,
+            ProjectRole.STRUCTURAL_ENGINEER,
+            ProjectRole.SITE_INSPECTOR,
+        },
+    )
+    if severity not in ("low", "medium", "high", "critical"):
+        raise ConstructionError("Unknown issue severity.")
+    issue = EngineeringIssue.objects.create(
+        project=project,
+        reference=reference,
+        category=category,
+        severity=severity,
+        description=description,
+        responsible_party=responsible_party,
+        resolution_deadline=resolution_deadline,
+    )
+    audit(project, actor, "engineering_issue.recorded", "engineering_issue", issue.id)
+    return issue
+
+
+@transaction.atomic
+def close_engineering_issue(*, actor, issue, resolution_notes):
+    _require_project_role(
+        actor,
+        issue.project,
+        {
+            ProjectRole.PROJECT_MANAGER,
+            ProjectRole.CIVIL_ENGINEER,
+            ProjectRole.STRUCTURAL_ENGINEER,
+            ProjectRole.SITE_INSPECTOR,
+        },
+    )
+    issue.status = "closed"
+    issue.resolution_notes = resolution_notes
+    issue.closed_by = actor
+    issue.closed_at = timezone.now()
+    issue.save(update_fields=["status", "resolution_notes", "closed_by", "closed_at"])
+    audit(issue.project, actor, "engineering_issue.closed", "engineering_issue", issue.id)
+    return issue
+
+
 def calculate_boq(boq):
     if boq.status == BoQStatus.APPROVED:
         raise ConstructionError("Approved BoQs are locked.")
@@ -376,6 +473,38 @@ def set_milestone_dependencies(*, actor, milestone, dependent_ids):
 
 
 @transaction.atomic
+def set_activity_dependencies(*, actor, activity, dependent_ids):
+    _require_project_role(actor, activity.project, PROJECT_MANAGEMENT_ROLES)
+    candidate_id = str(activity.id)
+    ids = {str(value) for value in dependent_ids}
+    if candidate_id in ids:
+        raise ConstructionError("An activity cannot depend on itself.")
+    nodes = {
+        str(item.id): item for item in ProjectActivity.objects.filter(project=activity.project)
+    }
+    if not ids.issubset(nodes):
+        raise ConstructionError("Activity dependencies must belong to the same project.")
+    for start_id in ids:
+        seen = set()
+        stack = [start_id]
+        while stack:
+            node_id = stack.pop()
+            if node_id == candidate_id:
+                raise ConstructionError("Activity dependencies contain a cycle.")
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            node = nodes.get(node_id)
+            if node:
+                stack.extend(
+                    str(dep_id) for dep_id in node.dependencies.values_list("id", flat=True)
+                )
+    activity.dependencies.set(ProjectActivity.objects.filter(project=activity.project, id__in=ids))
+    audit(activity.project, actor, "activity.dependencies_changed", "activity", activity.id)
+    return activity
+
+
+@transaction.atomic
 def update_milestone_progress(*, actor, milestone, progress_percent, blockers=""):
     _require_project_role(
         actor, milestone.project, {ProjectRole.PROJECT_MANAGER, ProjectRole.CONTRACTOR}
@@ -509,3 +638,40 @@ def project_report(project):
         ],
         "source_revision": project.version,
     }
+
+
+def project_report_csv(project):
+    import csv
+    import io
+
+    report = project_report(project)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Glitters Construction Project Report"])
+    writer.writerow(["project_code", report["project"]["code"]])
+    writer.writerow(["project_name", report["project"]["name"]])
+    writer.writerow(["status", report["project"]["status"]])
+    writer.writerow(["budget", report["project"]["budget"]])
+    writer.writerow(["boq_total", report["boq_total"]])
+    writer.writerow([])
+    writer.writerow(["milestone", "progress_percent", "blockers"])
+    for milestone in report["milestones"]:
+        writer.writerow(
+            [
+                milestone["name"],
+                milestone["progress_percent"],
+                milestone["blockers"],
+            ]
+        )
+    writer.writerow([])
+    writer.writerow(["inspection", "status", "date", "open_defects"])
+    for inspection in report["inspections"]:
+        writer.writerow(
+            [
+                inspection["title"],
+                inspection["status"],
+                inspection["inspection_date"],
+                inspection["open_defects"],
+            ]
+        )
+    return output.getvalue()

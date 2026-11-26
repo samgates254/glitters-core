@@ -40,15 +40,28 @@ class ConstructionProject(models.Model):
     )
     code = models.CharField(max_length=32)
     name = models.CharField(max_length=200)
+    client_organization = models.ForeignKey(
+        "organizations.Organization",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="client_construction_projects",
+    )
+    project_type = models.CharField(max_length=64, blank=True, default="")
+    scope = models.TextField(blank=True, default="")
     classification = models.CharField(max_length=64)
     description = models.TextField(blank=True, default="")
     site_location_reference = models.CharField(max_length=128, blank=True, default="")
     client_name = models.CharField(max_length=200, blank=True, default="")
     budget = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    approved_budget = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    completion_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    risk_rating = models.CharField(max_length=16, default="medium")
     start_date = models.DateField(null=True, blank=True)
     expected_completion_date = models.DateField(null=True, blank=True)
+    actual_completion_date = models.DateField(null=True, blank=True)
     status = models.CharField(
-        max_length=16,
+        max_length=32,
         choices=((v, v.title()) for v in sorted(ProjectStatus.VALUES)),
         default=ProjectStatus.DRAFT,
     )
@@ -77,6 +90,15 @@ class ConstructionProject(models.Model):
             ),
             models.CheckConstraint(
                 condition=models.Q(budget__gte=0), name="construction_project_budget_nonnegative"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(approved_budget__gte=0),
+                name="construction_proj_approved_budget",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(completion_percent__gte=0)
+                & models.Q(completion_percent__lte=100),
+                name="construction_proj_completion",
             ),
             models.CheckConstraint(
                 condition=models.Q(status__in=sorted(ProjectStatus.VALUES)),
@@ -154,6 +176,52 @@ class ProjectPhase(models.Model):
                 | models.Q(actual_start__isnull=True)
                 | models.Q(actual_end__gte=models.F("actual_start")),
                 name="construction_phase_actual_range",
+            ),
+        ]
+
+
+class ProjectActivity(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        ConstructionProject, on_delete=models.CASCADE, related_name="activities"
+    )
+    phase = models.ForeignKey(
+        ProjectPhase,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="activities",
+    )
+    name = models.CharField(max_length=200)
+    assignee = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    planned_start = models.DateField(null=True, blank=True)
+    planned_end = models.DateField(null=True, blank=True)
+    actual_start = models.DateField(null=True, blank=True)
+    actual_end = models.DateField(null=True, blank=True)
+    progress_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    dependencies = models.ManyToManyField(
+        "self", symmetrical=False, blank=True, related_name="dependent_activities"
+    )
+    blocker_notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(progress_percent__gte=0) & models.Q(progress_percent__lte=100),
+                name="construction_activity_progress",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(planned_end__isnull=True)
+                | models.Q(planned_start__isnull=True)
+                | models.Q(planned_end__gte=models.F("planned_start")),
+                name="construction_activity_plan_range",
             ),
         ]
 
@@ -257,6 +325,118 @@ class Defect(models.Model):
                 name="construction_defect_status_valid",
             ),
         ]
+
+
+class InspectionChecklist(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    inspection = models.ForeignKey(
+        EngineeringInspection, on_delete=models.CASCADE, related_name="checklist_items"
+    )
+    item = models.CharField(max_length=200)
+    outcome = models.CharField(max_length=16, default="pending")
+    notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(outcome__in=["pending", "pass", "fail", "not_applicable"]),
+                name="construction_checklist_outcome_valid",
+            )
+        ]
+
+
+class EngineeringIssue(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        ConstructionProject, on_delete=models.CASCADE, related_name="engineering_issues"
+    )
+    inspection = models.ForeignKey(
+        EngineeringInspection,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="issues",
+    )
+    reference = models.CharField(max_length=32)
+    category = models.CharField(max_length=64)
+    severity = models.CharField(max_length=16)
+    description = models.TextField()
+    responsible_party = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    resolution_deadline = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=16, default="open")
+    corrective_action = models.TextField(blank=True, default="")
+    resolution_notes = models.TextField(blank=True, default="")
+    closed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "reference"], name="construction_issue_ref_unique"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(status__in=["open", "in_progress", "resolved", "closed"]),
+                name="construction_issue_status_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(severity__in=["low", "medium", "high", "critical"]),
+                name="construction_issue_severity_valid",
+            ),
+        ]
+
+
+class SiteDiary(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        ConstructionProject, on_delete=models.CASCADE, related_name="site_diaries"
+    )
+    diary_date = models.DateField()
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="construction_site_diaries",
+    )
+    weather_and_conditions = models.TextField(blank=True, default="")
+    work_completed = models.TextField(blank=True, default="")
+    labor_summary = models.JSONField(default=dict, blank=True)
+    contractor_activity = models.TextField(blank=True, default="")
+    equipment_usage = models.TextField(blank=True, default="")
+    material_deliveries = models.TextField(blank=True, default="")
+    delays = models.TextField(blank=True, default="")
+    instructions = models.TextField(blank=True, default="")
+    safety_observations = models.TextField(blank=True, default="")
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "diary_date"], name="construction_diary_day_unique"
+            )
+        ]
+        ordering = ["-diary_date"]
 
 
 class BoQ(models.Model):
@@ -469,6 +649,35 @@ class Tender(models.Model):
         ]
 
 
+class TenderPackage(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="packages")
+    title = models.CharField(max_length=200)
+    eligibility_criteria = models.TextField(blank=True, default="")
+    submission_deadline = models.DateTimeField()
+    bid_opening_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class TenderDocument(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="documents")
+    bidder = models.ForeignKey(
+        "organizations.Organization",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    document_type = models.CharField(max_length=32)
+    file = models.FileField(upload_to="construction/tenders/%Y/%m/")
+    integrity_digest = models.CharField(max_length=64)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
 class TenderBid(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="bids")
@@ -617,6 +826,24 @@ class RFI(models.Model):
                 condition=models.Q(status__in=sorted(RFIStatus.VALUES)),
                 name="construction_rfi_status_valid",
             ),
+        ]
+
+
+class RFIResponse(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rfi = models.ForeignKey(RFI, on_delete=models.CASCADE, related_name="responses")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    response_type = models.CharField(max_length=16, default="response")
+    text = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(response_type__in=["response", "clarification"]),
+                name="construction_rfi_response_type",
+            )
         ]
 
 
