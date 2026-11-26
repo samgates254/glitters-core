@@ -1,6 +1,8 @@
 # Wave 0 progress
 
 Branch: `fix/wave0-security-and-integrity`  
+Commit: `b40ba5ee447e39032d9cb7b70bf3416ab1c5747b`  
+Draft PR: https://github.com/samgates254/glitters-core/pull/3  
 Base: `origin/main` at `0a4ea39`  
 Worktree: `/home/mr-robot/Projects/glitters-core-wave0`
 
