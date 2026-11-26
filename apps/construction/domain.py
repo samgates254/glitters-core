@@ -91,6 +91,22 @@ class DefectStatus:
 class BoQStatus:
     DRAFT = "draft"
     SUBMITTED = "submitted"
+    REVIEWED = "reviewed"
+    APPROVED = "approved"
+    SUPERSEDED = "superseded"
+    CHOICES = (
+        (DRAFT, "Draft"),
+        (SUBMITTED, "Submitted"),
+        (REVIEWED, "Reviewed"),
+        (APPROVED, "Approved"),
+        (SUPERSEDED, "Superseded"),
+    )
+    VALUES = frozenset(value for value, _ in CHOICES)
+
+
+class BudgetStatus:
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
     APPROVED = "approved"
     SUPERSEDED = "superseded"
     CHOICES = (
