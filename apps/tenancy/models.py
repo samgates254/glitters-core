@@ -37,6 +37,10 @@ from apps.tenancy.domain import (
     generate_lease_reference,
     lease_transition_allowed,
 )
+from apps.tenancy.services.document import (
+    CONTRACT_DATA_HASH_HELP,
+    RENDERED_DOCUMENT_HASH_HELP,
+)
 
 
 class DateRange(Func):
@@ -329,13 +333,13 @@ class Lease(models.Model):
         max_length=64,
         blank=True,
         default="",
-        help_text="SHA-256 hash of canonical RFC 8785 JSON structured contract data.",
+        help_text=CONTRACT_DATA_HASH_HELP,
     )
     rendered_document_hash = models.CharField(
         max_length=64,
         blank=True,
         default="",
-        help_text="SHA-256 hash of exact visual PDF/A document artifact presented to signatories.",
+        help_text=RENDERED_DOCUMENT_HASH_HELP,
     )
     rendered_document_uri = models.CharField(
         max_length=255,
@@ -604,11 +608,11 @@ class LeaseSignatureEvidence(models.Model):
     document_version = models.PositiveIntegerField(default=1)
     contract_data_hash = models.CharField(
         max_length=64,
-        help_text="SHA-256 of canonical RFC 8785 JSON structured contract payload at signature time.",
+        help_text=CONTRACT_DATA_HASH_HELP,
     )
     rendered_document_hash = models.CharField(
         max_length=64,
-        help_text="SHA-256 of exact visual PDF/A document artifact presented to signatory.",
+        help_text=RENDERED_DOCUMENT_HASH_HELP,
     )
     rendered_document_uri = models.CharField(max_length=255, blank=True, default="")
     signature_method = models.CharField(max_length=32, choices=SignatureMethod.CHOICES)
