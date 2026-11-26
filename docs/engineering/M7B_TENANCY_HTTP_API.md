@@ -31,7 +31,8 @@ A lease the caller cannot see returns 404. Anonymous calls return 401. Signature
 | POST | `/api/v1/tenancy/leases/<id>/termination-requests/` | `request_lease_termination` |
 | POST | `/api/v1/tenancy/leases/<id>/terminate/` | `terminate_lease` |
 | GET | `/api/v1/tenancy/leases/<id>/history/` | Audit events for a visible lease |
-| GET | `/api/v1/tenancy/leases/<id>/document/` | Document version and hashes |
+| GET | `/api/v1/tenancy/leases/<id>/document/` | Document version and hashes, without bytes |
+| GET | `/api/v1/tenancy/leases/<id>/document/content/` | Stored bytes for a visible lease |
 | GET | `/api/v1/tenancy/leases/<id>/reservation/` | Reservation interval |
 | GET | `/api/v1/tenancy/summaries/occupancy/` | Counts only. No tenant, address, or document |
 
@@ -53,6 +54,10 @@ Renewal is a new lease row with `supersedes_lease` set. The predecessor moves fr
 
 A residential or commercial periodic lease may omit `term_end_date`. Approval reserves occupancy with a null exclusive end. PostgreSQL stores that as an unbounded half-open range, so the existing GiST exclusion still rejects a later lease on the same property. A finite reservation cannot be moved later or cleared. Termination sets the exclusive end to the day after the termination date and leaves the contract digest and null term end unchanged. The released dates can then be reserved.
 
+## Rendered documents
+
+Approval stores the exact rendered bytes on the server, one row per lease document version. The stored locator is `tenancy://leases/<id>/documents/<version>`. A client-supplied URI is not the retrieval path. `GET .../document/` returns version and hashes. `GET .../document/content/` returns the bytes only when the caller can see the lease and the stored SHA-256 matches both the row and the lease. A mismatch returns 409 and no document body. Click-to-sign remains an audit record, not a PDF/A seal.
+
 ## Not in this branch
 
-Rendered-document storage, rental ledgers, and the tenancy portal remain separate follow-on work.
+Rental ledgers and the tenancy portal remain separate follow-on work.

@@ -8,6 +8,7 @@ from apps.tenancy.views import (
     LeaseCancelView,
     LeaseCollectionView,
     LeaseDetailView,
+    LeaseDocumentContentView,
     LeaseDocumentView,
     LeaseHistoryView,
     LeasePartyListView,
@@ -54,6 +55,11 @@ urlpatterns = [
     ),
     path("leases/<uuid:lease_id>/terminate/", LeaseTerminateView.as_view(), name="lease-terminate"),
     path("leases/<uuid:lease_id>/history/", LeaseHistoryView.as_view(), name="lease-history"),
+    path(
+        "leases/<uuid:lease_id>/document/content/",
+        LeaseDocumentContentView.as_view(),
+        name="lease-document-content",
+    ),
     path("leases/<uuid:lease_id>/document/", LeaseDocumentView.as_view(), name="lease-document"),
     path(
         "leases/<uuid:lease_id>/reservation/",

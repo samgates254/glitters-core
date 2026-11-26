@@ -1086,3 +1086,63 @@ class TenancyEvent(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValueError("Tenancy events are append-only and cannot be deleted.")
+
+
+class StoredLeaseDocumentQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValidationError("Stored lease documents cannot be replaced.")
+
+    def delete(self):
+        raise ValidationError("Stored lease documents cannot be deleted.")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ValidationError("Stored lease documents cannot be replaced.")
+
+
+class StoredLeaseDocument(models.Model):
+    """Exact rendered bytes held by the server for one lease document version."""
+
+    objects = StoredLeaseDocumentQuerySet.as_manager()
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lease = models.ForeignKey(
+        Lease,
+        on_delete=models.PROTECT,
+        related_name="stored_documents",
+    )
+    document_version = models.PositiveIntegerField()
+    content_sha256 = models.CharField(max_length=64)
+    byte_size = models.PositiveIntegerField()
+    media_type = models.CharField(max_length=64, default="application/octet-stream")
+    content = models.BinaryField()
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="stored_lease_documents",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "tenancy_stored_lease_document"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["lease", "document_version"],
+                name="tenancy_stored_document_version_unique",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(byte_size__gt=0),
+                name="tenancy_stored_document_size_positive",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError("Stored lease documents cannot be replaced.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Stored lease documents cannot be deleted.")
+
+    @property
+    def locator(self) -> str:
+        return f"tenancy://leases/{self.lease_id}/documents/{self.document_version}"

@@ -11,6 +11,7 @@ import uuid
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_ipv46_address
 from django.db.models import Count
+from django.http import HttpResponse
 from rest_framework.exceptions import NotFound
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
@@ -47,6 +48,7 @@ from apps.tenancy.services.leases import (
     sign_lease,
     terminate_lease,
 )
+from apps.tenancy.services.storage import verify_stored_lease_document
 
 
 def _call(func, /, *args, **kwargs):
@@ -368,6 +370,11 @@ class LeaseDocumentView(APIView):
 
     def get(self, request, lease_id):
         lease = _lease_or_404(request.user, lease_id)
+        stored = (
+            lease.stored_documents.filter(document_version=lease.document_version)
+            .values("byte_size", "media_type", "content_sha256")
+            .first()
+        )
         return Response(
             {
                 "lease_id": str(lease.id),
@@ -377,8 +384,26 @@ class LeaseDocumentView(APIView):
                 "rendered_document_uri": lease.rendered_document_uri,
                 "signature_deadline": lease.signature_deadline,
                 "status": lease.status,
+                "byte_size": None if stored is None else stored["byte_size"],
+                "media_type": None if stored is None else stored["media_type"],
+                "stored": stored is not None,
             }
         )
+
+
+class LeaseDocumentContentView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, lease_id):
+        lease = _lease_or_404(request.user, lease_id)
+        stored = _call(verify_stored_lease_document, lease)
+        response = HttpResponse(bytes(stored.content), content_type=stored.media_type)
+        filename = f"lease-{lease.id}-v{stored.document_version}"
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["X-Content-SHA256"] = stored.content_sha256
+        response["Cache-Control"] = "private, no-store"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
 
 
 class LeaseReservationView(APIView):

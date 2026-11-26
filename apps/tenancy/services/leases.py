@@ -80,6 +80,10 @@ from apps.tenancy.services.document import (
     compute_rendered_document_hash,
     contract_payload_for_lease,
 )
+from apps.tenancy.services.storage import (
+    store_rendered_lease_document,
+    verify_stored_lease_document,
+)
 from apps.tenancy.services.validation import validate_rentable_unit
 
 MAX_RENDERED_BYTES = 20_971_520
@@ -220,7 +224,7 @@ def approve_lease_terms(
     require_actor(actor)
     moment = _aware_moment(now)
     document = _rendered_bytes(rendered_document)
-    uri = _rendered_uri(rendered_document_uri)
+    _rendered_uri(rendered_document_uri)
     hours = _deadline_hours(deadline_hours)
     try:
         with transaction.atomic():
@@ -243,7 +247,8 @@ def approve_lease_terms(
             payload = contract_payload_for_lease(lease, parties)
             lease.contract_data_hash = compute_contract_data_hash(payload)
             lease.rendered_document_hash = compute_rendered_document_hash(document)
-            lease.rendered_document_uri = uri
+            stored = store_rendered_lease_document(actor=actor, lease=lease, document=document)
+            lease.rendered_document_uri = stored.locator
             lease.effective_end_date = exclusive_end
             lease.signature_deadline = moment + timedelta(hours=hours)
             lease.status = LeaseStatus.PENDING_SIGNATURE
@@ -385,6 +390,7 @@ def sign_lease(
                 or rendered_hash != lease.rendered_document_hash
             ):
                 raise TenancyError(TERMS_HASH_MISMATCH, status_code=409)
+            verify_stored_lease_document(lease)
             evidence_key = _signature_key(lease, party, client_key)
             existing = LeaseSignatureEvidence.objects.filter(
                 lease=lease,
