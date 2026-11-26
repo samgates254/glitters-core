@@ -201,6 +201,9 @@ class Permission:
     LEASES_VIEW = "leases.view"
     LEASES_PREPARE = "leases.prepare"
     LEASES_APPROVE = "leases.approve"
+    LEASES_EXECUTE = "leases.execute"
+    LEASES_TERMINATE = "leases.terminate"
+    TENANTS_VET = "tenants.vet"
     FINANCE_VIEW = "finance.view"
     FINANCE_MANAGE = "finance.manage"
     HOSPITALITY_MANAGE = "hospitality.manage"
@@ -236,14 +239,24 @@ _OPERATIONS_PERMISSIONS = frozenset(
     }
 )
 
-# leases.manage stays reserved. These three do not mint property title.
+# leases.manage stays reserved. These names do not mint property title.
 # Prepare and approve still require a direct management grant or an active
 # management agreement whose granting user holds that grant.
+# leases.execute and leases.terminate are platform checks for an agent.
+# A direct owner does not need them. An organization admin who holds them
+# still cannot execute unless the agreement grants can_execute_leases.
 _LEASE_PERMISSIONS = frozenset(
     {
         Permission.LEASES_VIEW,
         Permission.LEASES_PREPARE,
         Permission.LEASES_APPROVE,
+        Permission.TENANTS_VET,
+    }
+)
+_LEASE_EXECUTION_PERMISSIONS = frozenset(
+    {
+        Permission.LEASES_EXECUTE,
+        Permission.LEASES_TERMINATE,
     }
 )
 
@@ -267,6 +280,7 @@ _OWNER_PERMISSIONS = (
     | _LEAD_PERMISSIONS
     | _OPERATIONS_PERMISSIONS
     | _LEASE_PERMISSIONS
+    | _LEASE_EXECUTION_PERMISSIONS
 )
 
 _ADMIN_PERMISSIONS = _OWNER_PERMISSIONS - {

@@ -27,6 +27,8 @@ from apps.operations.models import UnitPhysicalProfile
 from apps.operations.services.agreements import verify_lease_execution_authority
 from apps.operations.services.physical_profiles import update_physical_profile
 from apps.organizations.domain import Permission
+from apps.organizations.errors import OrganizationError
+from apps.organizations.services.authorization import authorize
 from apps.properties.models import Property
 from apps.properties.services.locking import is_deadlock, lock_properties
 from apps.tenancy.domain import (
@@ -444,7 +446,7 @@ def activate_lease(*, actor, lease_id, now: datetime | None = None) -> Lease:
                 raise TenancyError(NOT_FOUND, status_code=404)
             _lock_property_leases(hint["property_id"])
             lease = _locked_lease(lease_id)
-            _require_execution_authority(actor, lease.property)
+            _require_execution_authority(actor, lease.property, Permission.LEASES_EXECUTE)
             if lease.status != LeaseStatus.FULLY_EXECUTED:
                 raise TenancyError(STATUS_INVALID, status_code=409)
             ready = HandoverProtocol.objects.filter(
@@ -519,7 +521,7 @@ def terminate_lease(
                 raise TenancyError(NOT_FOUND, status_code=404)
             _lock_property_leases(hint["property_id"])
             lease = _locked_lease(lease_id)
-            _require_execution_authority(actor, lease.property)
+            _require_execution_authority(actor, lease.property, Permission.LEASES_TERMINATE)
             allowed = {
                 LeaseStatus.FULLY_EXECUTED,
                 LeaseStatus.ACTIVE,
@@ -627,6 +629,101 @@ def terminate_lease(
         if is_deadlock(exc):
             raise TenancyError(CONFLICT, status_code=409) from exc
         raise
+
+
+def request_lease_termination(
+    *,
+    actor,
+    lease_id,
+    termination_date: date,
+    reason: str,
+) -> TenancyEvent:
+    """Record a termination request without changing the signed contract.
+
+    The lease status, dates, rent, and digest stay as they are. Executing
+    the termination is a separate authorized call.
+    """
+
+    require_actor(actor)
+    if isinstance(termination_date, datetime) or not isinstance(termination_date, date):
+        raise TenancyError("The termination date must be a date.", status_code=400)
+    if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 2000:
+        raise TenancyError("A termination reason is required.", status_code=400)
+    reason = reason.strip()
+    try:
+        with transaction.atomic():
+            hint = Lease.objects.filter(pk=lease_id).values("property_id").first()
+            if hint is None:
+                raise TenancyError(NOT_FOUND, status_code=404)
+            _lock_property_leases(hint["property_id"])
+            lease = _locked_lease(lease_id)
+            if not _may_request_termination(actor, lease):
+                raise TenancyError(PERMISSION_DENIED, status_code=403)
+            allowed = {
+                LeaseStatus.FULLY_EXECUTED,
+                LeaseStatus.ACTIVE,
+                LeaseStatus.UNDER_RENEWAL,
+            }
+            if lease.status not in allowed:
+                raise TenancyError(STATUS_INVALID, status_code=409)
+            if termination_date < lease.start_date:
+                raise TenancyError(
+                    "Termination cannot be before the lease start date.",
+                    status_code=400,
+                )
+            if lease.term_end_date is not None and termination_date > lease.term_end_date:
+                raise TenancyError(
+                    "Termination cannot be after the contractual term end.",
+                    status_code=400,
+                )
+            preserved_status = lease.status
+            event = record_tenancy_event(
+                actor=actor,
+                lease=lease,
+                action=TenancyEventAction.LEASE_TERMINATION_REQUESTED,
+                object_type="lease",
+                object_id=lease.id,
+                idempotency_key=tenancy_idempotency_key(
+                    "lease_termination_requested",
+                    lease.id,
+                    actor.id,
+                    termination_date.isoformat(),
+                    reason,
+                ),
+                metadata={
+                    "termination_date": termination_date.isoformat(),
+                    "status": preserved_status,
+                    "reason": reason,
+                },
+            )
+            lease.refresh_from_db()
+            if lease.status != preserved_status or lease.actual_termination_date is not None:
+                raise TenancyError(CONFLICT, status_code=409)
+            return event
+    except TenancyError:
+        raise
+    except DjangoValidationError as exc:
+        _raise_validation(exc)
+    except OperationalError as exc:
+        if is_deadlock(exc):
+            raise TenancyError(CONFLICT, status_code=409) from exc
+        raise
+
+
+def _may_request_termination(actor, lease: Lease) -> bool:
+    if lease.property_owner_id == actor.id or lease.created_by_id == actor.id:
+        return True
+    if lease.parties.filter(user_id=actor.id).exists():
+        return True
+    if lease.managing_organization_id is None:
+        return False
+    for permission in (Permission.LEASES_VIEW, Permission.LEASES_TERMINATE):
+        try:
+            authorize(actor, lease.managing_organization_id, permission)
+            return True
+        except OrganizationError:
+            continue
+    return False
 
 
 def _expire_property(property_id, moment: datetime, actor) -> int:
@@ -778,11 +875,23 @@ def _locked_party(party_id) -> LeaseParty:
         raise TenancyError(NOT_FOUND, status_code=404) from exc
 
 
-def _require_execution_authority(actor, property_record) -> None:
+def _require_execution_authority(actor, property_record, permission: str) -> None:
+    """Direct owners pass. Agents also need the named platform permission.
+
+    The permission does not create a property grant. An agent whose agreement
+    lacks can_execute_leases still fails the legal check before this permission.
+    """
+
     try:
-        verify_lease_execution_authority(actor, property_record)
+        agreement = verify_lease_execution_authority(actor, property_record)
     except OperationsError as exc:
         raise TenancyError(exc.detail, status_code=exc.status_code) from exc
+    if agreement is None:
+        return
+    try:
+        authorize(actor, agreement.managing_organization_id, permission)
+    except OrganizationError as exc:
+        raise TenancyError(PERMISSION_DENIED, status_code=403) from exc
 
 
 def _execute_if_complete(lease: Lease, moment: datetime, actor) -> None:
