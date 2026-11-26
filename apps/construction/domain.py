@@ -5,17 +5,33 @@ from decimal import Decimal
 
 class ProjectStatus:
     DRAFT = "draft"
+    PLANNING = "planning"
+    AWAITING_APPROVAL = "awaiting_approval"
     PLANNED = "planned"
     APPROVED = "approved"
     ACTIVE = "active"
     SUSPENDED = "suspended"
     COMPLETED = "completed"
     ARCHIVED = "archived"
-    VALUES = frozenset({DRAFT, PLANNED, APPROVED, ACTIVE, SUSPENDED, COMPLETED, ARCHIVED})
+    VALUES = frozenset(
+        {
+            DRAFT,
+            PLANNING,
+            AWAITING_APPROVAL,
+            PLANNED,
+            APPROVED,
+            ACTIVE,
+            SUSPENDED,
+            COMPLETED,
+            ARCHIVED,
+        }
+    )
 
 
 PROJECT_TRANSITIONS = {
-    ProjectStatus.DRAFT: frozenset({ProjectStatus.PLANNED}),
+    ProjectStatus.DRAFT: frozenset({ProjectStatus.PLANNING, ProjectStatus.PLANNED}),
+    ProjectStatus.PLANNING: frozenset({ProjectStatus.AWAITING_APPROVAL}),
+    ProjectStatus.AWAITING_APPROVAL: frozenset({ProjectStatus.APPROVED}),
     ProjectStatus.PLANNED: frozenset({ProjectStatus.APPROVED}),
     ProjectStatus.APPROVED: frozenset({ProjectStatus.ACTIVE, ProjectStatus.SUSPENDED}),
     ProjectStatus.ACTIVE: frozenset({ProjectStatus.SUSPENDED, ProjectStatus.COMPLETED}),

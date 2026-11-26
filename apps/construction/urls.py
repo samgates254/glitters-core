@@ -8,6 +8,8 @@ from apps.construction.views import (
     ProjectDetailView,
     ProjectReportView,
     ProjectTransitionView,
+    SiteDiaryApprovalView,
+    SiteDiaryCollectionView,
     TechnicalDocumentDownloadView,
 )
 
@@ -38,6 +40,16 @@ urlpatterns = [
         "projects/<uuid:project_id>/reports/",
         ProjectReportView.as_view(),
         name="construction-project-report",
+    ),
+    path(
+        "projects/<uuid:project_id>/site-diaries/",
+        SiteDiaryCollectionView.as_view(),
+        name="construction-site-diaries",
+    ),
+    path(
+        "site-diaries/<uuid:diary_id>/approval/",
+        SiteDiaryApprovalView.as_view(),
+        name="construction-site-diary-approval",
     ),
     path(
         "documents/<uuid:document_id>/download/",
