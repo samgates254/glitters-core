@@ -1,7 +1,7 @@
 """Celery application for GLITTERS CORE.
 
-No business tasks are registered yet. The worker and beat processes can boot
-and reach Redis. Redis is the broker, not the record of financial or booking truth.
+The tenancy reservation sweep is registered. Redis is the broker, not the
+record of a lease, a payment, or a booking. Lease truth stays in Postgres.
 """
 
 from __future__ import annotations

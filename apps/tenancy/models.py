@@ -149,6 +149,10 @@ IMMUTABLE_CONTRACT_FIELDS = {
     "created_by_id",
 }
 
+# Frozen while a signature reservation is pending. effective_end_date stays
+# editable after execution so termination can release the occupancy tail.
+PENDING_RESERVATION_FIELDS = frozenset({"effective_end_date", "signature_deadline"})
+
 _LEASE_UPDATE_ALIASES = {
     "property": "property_id",
     "property_owner": "property_owner_id",
@@ -168,13 +172,29 @@ def _reject_lease_status_changes(current_statuses, proposed: str) -> None:
             raise ValidationError(STATUS_INVALID)
 
 
+def _reject_pending_contract_writes(statuses, fields: set[str]) -> None:
+    """Block contractual rewrites after terms are approved and before execution."""
+
+    if LeaseStatus.PENDING_SIGNATURE not in statuses:
+        return
+    frozen = fields.intersection(IMMUTABLE_CONTRACT_FIELDS | PENDING_RESERVATION_FIELDS)
+    if not frozen:
+        return
+    label = ", ".join(sorted(frozen))
+    raise ValidationError(
+        "Direct update of contractual fields "
+        f"[{label}] is prohibited once lease terms are approved."
+    )
+
+
 class LeaseQuerySet(models.QuerySet):
     """QuerySet for Lease enforcing contractual immutability on executed records."""
 
     def update(self, **kwargs):
         normalized = _lease_update_field_names(kwargs.keys())
         attempted_immutable = normalized.intersection(IMMUTABLE_CONTRACT_FIELDS)
-        needs_status = "status" in kwargs or bool(attempted_immutable)
+        attempted_pending = normalized.intersection(PENDING_RESERVATION_FIELDS)
+        needs_status = "status" in kwargs or bool(attempted_immutable or attempted_pending)
         current_statuses = []
         if needs_status:
             current_statuses = list(self.values_list("status", flat=True).distinct())
@@ -187,12 +207,14 @@ class LeaseQuerySet(models.QuerySet):
                 f"Direct update of contractual fields {sorted(attempted_immutable)} is prohibited on "
                 "executed leases. Formal contractual variations must use LeaseAmendment."
             )
+        _reject_pending_contract_writes(current_statuses, normalized)
         return super().update(**kwargs)
 
     def bulk_update(self, objs, fields, **kwargs):
         normalized = _lease_update_field_names(fields)
         attempted_immutable = normalized.intersection(IMMUTABLE_CONTRACT_FIELDS)
-        if attempted_immutable or "status" in fields:
+        attempted_pending = normalized.intersection(PENDING_RESERVATION_FIELDS)
+        if attempted_immutable or attempted_pending or "status" in fields:
             current = {
                 row["id"]: row["status"]
                 for row in Lease.objects.filter(pk__in=[obj.pk for obj in objs if obj.pk]).values(
@@ -210,6 +232,15 @@ class LeaseQuerySet(models.QuerySet):
                     raise ValidationError(
                         f"Direct bulk_update of contractual fields {fields_label} is prohibited on "
                         "executed leases. Formal contractual variations must use LeaseAmendment."
+                    )
+                if previous == LeaseStatus.PENDING_SIGNATURE and (
+                    attempted_immutable or attempted_pending
+                ):
+                    watched = attempted_immutable | attempted_pending
+                    label = ", ".join(sorted(watched))
+                    raise ValidationError(
+                        "Direct bulk_update of contractual fields "
+                        f"[{label}] is prohibited once lease terms are approved."
                     )
         return super().bulk_update(objs, fields, **kwargs)
 
@@ -449,11 +480,13 @@ class Lease(models.Model):
             validate_rentable_unit(self.property)
 
         if not self._state.adding and self.pk:
-            original = (
-                Lease.objects.filter(pk=self.pk)
-                .values("status", *IMMUTABLE_CONTRACT_FIELDS)
-                .first()
+            watched = (
+                "status",
+                "effective_end_date",
+                "signature_deadline",
+                *IMMUTABLE_CONTRACT_FIELDS,
             )
+            original = Lease.objects.filter(pk=self.pk).values(*watched).first()
             if original:
                 orig_status = original["status"]
                 if not lease_transition_allowed(orig_status, self.status):
@@ -465,6 +498,14 @@ class Lease(models.Model):
                             raise ValidationError(
                                 f"Contractual field '{field}' is immutable on executed lease {self.reference}. "
                                 f"Formal contractual variations must use LeaseAmendment."
+                            )
+                elif orig_status == LeaseStatus.PENDING_SIGNATURE:
+                    frozen = IMMUTABLE_CONTRACT_FIELDS | PENDING_RESERVATION_FIELDS
+                    for field in frozen:
+                        if original[field] != getattr(self, field):
+                            raise ValidationError(
+                                f"Contractual field '{field}' is immutable once lease "
+                                f"{self.reference} is approved."
                             )
         super().save(*args, **kwargs)
 

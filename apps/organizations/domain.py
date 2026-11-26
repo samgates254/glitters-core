@@ -198,6 +198,9 @@ class Permission:
     OPERATIONS_VIEW = "operations.view"
     OPERATIONS_MANAGE = "operations.manage"
     LEASES_MANAGE = "leases.manage"
+    LEASES_VIEW = "leases.view"
+    LEASES_PREPARE = "leases.prepare"
+    LEASES_APPROVE = "leases.approve"
     FINANCE_VIEW = "finance.view"
     FINANCE_MANAGE = "finance.manage"
     HOSPITALITY_MANAGE = "hospitality.manage"
@@ -233,6 +236,17 @@ _OPERATIONS_PERMISSIONS = frozenset(
     }
 )
 
+# leases.manage stays reserved. These three do not mint property title.
+# Prepare and approve still require a direct management grant or an active
+# management agreement whose granting user holds that grant.
+_LEASE_PERMISSIONS = frozenset(
+    {
+        Permission.LEASES_VIEW,
+        Permission.LEASES_PREPARE,
+        Permission.LEASES_APPROVE,
+    }
+)
+
 _OWNER_PERMISSIONS = (
     frozenset(
         {
@@ -252,6 +266,7 @@ _OWNER_PERMISSIONS = (
     | _PROPERTY_RECORD_PERMISSIONS
     | _LEAD_PERMISSIONS
     | _OPERATIONS_PERMISSIONS
+    | _LEASE_PERMISSIONS
 )
 
 _ADMIN_PERMISSIONS = _OWNER_PERMISSIONS - {
@@ -272,6 +287,7 @@ _MANAGER_PERMISSIONS = (
     | _PROPERTY_RECORD_PERMISSIONS
     | _LEAD_PERMISSIONS
     | _OPERATIONS_PERMISSIONS
+    | _LEASE_PERMISSIONS
 )
 
 _READ_PERMISSIONS = frozenset({Permission.ORGANIZATION_VIEW})

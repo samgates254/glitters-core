@@ -1,0 +1,695 @@
+"""Lease draft, approval, and reservation expiry.
+
+Signing and termination are separate. These functions do not mint property
+grants and do not mount an HTTP route. Occupancy conflicts are pre-checked
+under row locks. The GiST exclusion constraint remains the backstop.
+"""
+
+from __future__ import annotations
+
+import re
+import uuid
+from datetime import date, datetime, timedelta
+from typing import Any
+
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, OperationalError, transaction
+from django.utils import timezone
+
+from apps.identity.domain import AccountStatus
+from apps.identity.models import User
+from apps.organizations.domain import Permission
+from apps.properties.models import Property
+from apps.properties.services.locking import is_deadlock, lock_properties
+from apps.tenancy.domain import (
+    CONFLICT,
+    NOT_FOUND,
+    OVERLAPPING_RESERVATION,
+    PERMISSION_DENIED,
+    STATUS_INVALID,
+    LeasePartyRole,
+    LeaseStatus,
+    LeaseType,
+    TenancyEventAction,
+)
+from apps.tenancy.errors import TenancyError
+from apps.tenancy.models import Lease, LeaseParty, RentalApplication, TenancyEvent
+from apps.tenancy.services.audit import record_tenancy_event, tenancy_idempotency_key
+from apps.tenancy.services.authority import (
+    actor_can_maintain_reservations,
+    require_actor,
+    resolve_lease_write_authority,
+)
+from apps.tenancy.services.document import (
+    compute_contract_data_hash,
+    compute_rendered_document_hash,
+    contract_payload_for_lease,
+)
+from apps.tenancy.services.validation import validate_rentable_unit
+
+MAX_RENDERED_BYTES = 20_971_520
+MAX_DEADLINE_HOURS = 14 * 24
+MAX_COVENANT_CHARS = 20_000
+_CURRENCY = re.compile(r"^[A-Z]{3}$")
+
+
+def create_draft_lease(
+    *,
+    actor,
+    property_id,
+    payload: dict[str, Any],
+    idempotency_key: str | None = None,
+    organization_id=None,
+) -> Lease:
+    """Create one draft. A repeated client key returns that same draft.
+
+    ``effective_end_date`` stays null. Drafts do not reserve occupancy.
+    The landlord party is the direct owner, not the preparing agent.
+    """
+
+    require_actor(actor)
+    if not isinstance(payload, dict):
+        raise TenancyError("Lease terms are required.", status_code=400)
+    client_key = _clean_client_key(idempotency_key)
+    try:
+        with transaction.atomic():
+            property_record = _lock_one_property(property_id)
+            authority = resolve_lease_write_authority(
+                actor,
+                property_record,
+                permission=Permission.LEASES_PREPARE,
+                organization_id=organization_id,
+            )
+            if client_key:
+                replay = _replay_draft(actor, client_key, property_record.id)
+                if replay is not None:
+                    return replay
+            _validate_unit(property_record)
+            terms = _parse_terms(payload)
+            parties = _parse_parties(payload.get("parties"), authority.property_owner)
+            application = _load_application(
+                payload.get("application_id"), property_record, parties
+            )
+            lease = Lease(
+                property=property_record,
+                property_owner=authority.property_owner,
+                managing_organization=authority.managing_organization,
+                management_agreement=authority.management_agreement,
+                application=application,
+                status=LeaseStatus.DRAFT,
+                document_version=1,
+                effective_end_date=None,
+                created_by=actor,
+                **terms,
+            )
+            lease.save()
+            created = []
+            for spec in parties:
+                created.append(
+                    LeaseParty.objects.create(
+                        lease=lease,
+                        user=spec["user"],
+                        party_role=spec["party_role"],
+                        has_signature_authority=spec["has_signature_authority"],
+                    )
+                )
+            draft_key = (
+                tenancy_idempotency_key("lease_drafted", actor.id, client_key)
+                if client_key
+                else tenancy_idempotency_key("lease_drafted", lease.id)
+            )
+            record_tenancy_event(
+                actor=actor,
+                lease=lease,
+                action=TenancyEventAction.LEASE_DRAFTED,
+                object_type="lease",
+                object_id=lease.id,
+                idempotency_key=draft_key,
+                metadata={
+                    "reference": lease.reference,
+                    "property_id": str(property_record.id),
+                    "lease_type": lease.lease_type,
+                    "rent_amount_minor": lease.rent_amount_minor,
+                    "rent_currency": lease.rent_currency,
+                    "start_date": lease.start_date.isoformat(),
+                    "term_end_date": lease.term_end_date.isoformat(),
+                },
+            )
+            for party in created:
+                record_tenancy_event(
+                    actor=actor,
+                    lease=lease,
+                    action=TenancyEventAction.LEASE_PARTY_ADDED,
+                    object_type="lease_party",
+                    object_id=party.id,
+                    idempotency_key=tenancy_idempotency_key(
+                        "lease_party_added", lease.id, party.user_id, party.party_role
+                    ),
+                    metadata={
+                        "party_role": party.party_role,
+                        "user_id": str(party.user_id),
+                        "has_signature_authority": party.has_signature_authority,
+                    },
+                )
+            return lease
+    except TenancyError:
+        raise
+    except DjangoValidationError as exc:
+        _raise_validation(exc)
+    except IntegrityError as exc:
+        if client_key:
+            replay = _replay_draft_outside(actor, client_key, property_id)
+            if replay is not None:
+                return replay
+        raise TenancyError(CONFLICT, status_code=409) from exc
+    except OperationalError as exc:
+        if is_deadlock(exc):
+            raise TenancyError(CONFLICT, status_code=409) from exc
+        raise
+
+
+def approve_lease_terms(
+    *,
+    actor,
+    lease_id,
+    rendered_document: bytes,
+    rendered_document_uri: str = "",
+    deadline_hours: int = 72,
+    now: datetime | None = None,
+) -> Lease:
+    """Move a complete draft to pending signature and reserve the unit.
+
+    Due reservations on the same unit are expired in this transaction before
+    the new interval is stored. A later failure rolls that expiry back. The
+    expiry key makes the retry idempotent.
+    """
+
+    require_actor(actor)
+    moment = _aware_moment(now)
+    document = _rendered_bytes(rendered_document)
+    uri = _rendered_uri(rendered_document_uri)
+    hours = _deadline_hours(deadline_hours)
+    try:
+        with transaction.atomic():
+            hint = Lease.objects.filter(pk=lease_id).values("property_id").first()
+            if hint is None:
+                raise TenancyError(NOT_FOUND, status_code=404)
+            _property_record, locked_leases = _lock_property_leases(hint["property_id"])
+            _expire_loaded(locked_leases, moment, actor)
+            lease = _locked_lease(lease_id)
+            if lease.property_id != hint["property_id"]:
+                raise TenancyError(CONFLICT, status_code=409)
+            _assert_approval_authority(actor, lease)
+            if lease.status != LeaseStatus.DRAFT:
+                raise TenancyError(STATUS_INVALID, status_code=409)
+            parties = list(lease.parties.select_related("user"))
+            _require_approvable_terms(lease, parties)
+            exclusive_end = lease.term_end_date + timedelta(days=1)
+            if _reservation_conflict(lease, lease.start_date, exclusive_end):
+                raise TenancyError(OVERLAPPING_RESERVATION, status_code=409)
+            payload = contract_payload_for_lease(lease, parties)
+            lease.contract_data_hash = compute_contract_data_hash(payload)
+            lease.rendered_document_hash = compute_rendered_document_hash(document)
+            lease.rendered_document_uri = uri
+            lease.effective_end_date = exclusive_end
+            lease.signature_deadline = moment + timedelta(hours=hours)
+            lease.status = LeaseStatus.PENDING_SIGNATURE
+            lease.save()
+            record_tenancy_event(
+                actor=actor,
+                lease=lease,
+                action=TenancyEventAction.LEASE_TERMS_APPROVED,
+                object_type="lease",
+                object_id=lease.id,
+                idempotency_key=tenancy_idempotency_key(
+                    "lease_terms_approved",
+                    lease.id,
+                    lease.document_version,
+                    lease.contract_data_hash,
+                ),
+                metadata={
+                    "reference": lease.reference,
+                    "document_version": lease.document_version,
+                    "contract_data_hash": lease.contract_data_hash,
+                    "rendered_document_hash": lease.rendered_document_hash,
+                    "signature_deadline": lease.signature_deadline.isoformat(),
+                    "effective_end_date": lease.effective_end_date.isoformat(),
+                },
+            )
+            return lease
+    except TenancyError:
+        raise
+    except DjangoValidationError as exc:
+        _raise_validation(exc)
+    except IntegrityError as exc:
+        if "tenancy_lease_exclude_overlapping_contractual_leases" in str(exc):
+            raise TenancyError(OVERLAPPING_RESERVATION, status_code=409) from exc
+        raise TenancyError(CONFLICT, status_code=409) from exc
+    except OperationalError as exc:
+        if is_deadlock(exc):
+            raise TenancyError(CONFLICT, status_code=409) from exc
+        raise
+
+
+def expire_due_reservations(
+    *,
+    property_id=None,
+    now: datetime | None = None,
+    actor=None,
+    trusted_system: bool = False,
+) -> int:
+    """Expire pending reservations whose signature deadline is at or before now.
+
+    ``now >= signature_deadline`` is expired. A second call does not add an
+    audit row or change an already expired lease. A full sweep requires
+    ``trusted_system``. Callers naming one property must be allowed to
+    prepare or approve that property, or hold direct management.
+    """
+
+    moment = _aware_moment(now)
+    if not trusted_system:
+        require_actor(actor)
+        if property_id is None:
+            raise TenancyError(PERMISSION_DENIED, status_code=403)
+        property_record = Property.objects.filter(pk=property_id).first()
+        if property_record is None:
+            raise TenancyError(NOT_FOUND, status_code=404)
+        if not actor_can_maintain_reservations(actor, property_record):
+            raise TenancyError(PERMISSION_DENIED, status_code=403)
+        with transaction.atomic():
+            return _expire_property(property_record.id, moment, actor)
+
+    due_property_ids = Lease.objects.filter(
+        status=LeaseStatus.PENDING_SIGNATURE,
+        signature_deadline__isnull=False,
+        signature_deadline__lte=moment,
+    )
+    if property_id is not None:
+        due_property_ids = due_property_ids.filter(property_id=property_id)
+    property_ids = sorted(
+        set(due_property_ids.values_list("property_id", flat=True)),
+        key=str,
+    )
+    expired = 0
+    for one_property_id in property_ids:
+        with transaction.atomic():
+            expired += _expire_property(one_property_id, moment, None)
+    return expired
+
+
+def _expire_property(property_id, moment: datetime, actor) -> int:
+    _property_record, leases = _lock_property_leases(property_id)
+    return _expire_loaded(leases, moment, actor)
+
+
+def _expire_loaded(leases, moment: datetime, actor) -> int:
+    expired = 0
+    for lease in leases:
+        deadline = lease.signature_deadline
+        if lease.status != LeaseStatus.PENDING_SIGNATURE:
+            continue
+        if deadline is None or deadline > moment:
+            continue
+        lease.status = LeaseStatus.EXPIRED_UNSIGNED
+        lease.save(update_fields=["status", "updated_at"])
+        record_tenancy_event(
+            actor=actor,
+            lease=lease,
+            action=TenancyEventAction.LEASE_RESERVATION_EXPIRED,
+            object_type="lease",
+            object_id=lease.id,
+            idempotency_key=tenancy_idempotency_key(
+                "lease_reservation_expired",
+                lease.id,
+                lease.document_version,
+                deadline.isoformat(),
+            ),
+            metadata={
+                "reference": lease.reference,
+                "signature_deadline": deadline.isoformat(),
+                "source": "system" if actor is None else "actor",
+            },
+        )
+        expired += 1
+    return expired
+
+
+def _assert_approval_authority(actor, lease: Lease) -> None:
+    if lease.managing_organization_id is None:
+        authority = resolve_lease_write_authority(
+            actor,
+            lease.property,
+            permission=Permission.LEASES_APPROVE,
+            organization_id=None,
+        )
+        if lease.property_owner_id != authority.property_owner.id:
+            raise TenancyError(PERMISSION_DENIED, status_code=403)
+        return
+    authority = resolve_lease_write_authority(
+        actor,
+        lease.property,
+        permission=Permission.LEASES_APPROVE,
+        organization_id=lease.managing_organization_id,
+    )
+    if authority.management_agreement is None:
+        raise TenancyError(PERMISSION_DENIED, status_code=403)
+    if lease.management_agreement_id != authority.management_agreement.id:
+        raise TenancyError(PERMISSION_DENIED, status_code=403)
+    if lease.property_owner_id != authority.property_owner.id:
+        raise TenancyError(PERMISSION_DENIED, status_code=403)
+
+
+def _require_approvable_terms(lease: Lease, parties: list[LeaseParty]) -> None:
+    if lease.term_end_date is None or lease.term_end_date < lease.start_date:
+        raise TenancyError("A bounded term end date is required.", status_code=400)
+    if lease.rent_amount_minor <= 0:
+        raise TenancyError("Rent must be a positive number of minor units.", status_code=400)
+    if not _CURRENCY.fullmatch(lease.rent_currency or ""):
+        raise TenancyError("Rent currency must be three letters.", status_code=400)
+    if not 1 <= lease.payment_due_day <= 28:
+        raise TenancyError("Payment due day must be from 1 to 28.", status_code=400)
+    if not 0 <= lease.grace_period_days <= 30:
+        raise TenancyError("Grace period must be from 0 to 30 days.", status_code=400)
+    if lease.deposit_amount_minor < 0 or lease.service_charge_minor < 0:
+        raise TenancyError("Deposit and service charge cannot be negative.", status_code=400)
+    primaries = [party for party in parties if party.party_role == LeasePartyRole.PRIMARY_TENANT]
+    landlords = [party for party in parties if party.party_role == LeasePartyRole.LANDLORD]
+    if len(primaries) != 1 or not primaries[0].has_signature_authority:
+        raise TenancyError(
+            "Approval needs one primary tenant with signature authority.",
+            status_code=400,
+        )
+    if primaries[0].user_id == lease.property_owner_id:
+        raise TenancyError("The primary tenant cannot be the property owner.", status_code=400)
+    if primaries[0].user.status != AccountStatus.ACTIVE:
+        raise TenancyError("The primary tenant is not an active account.", status_code=400)
+    if (
+        len(landlords) != 1
+        or landlords[0].user_id != lease.property_owner_id
+        or not landlords[0].has_signature_authority
+    ):
+        raise TenancyError(
+            "Approval needs the verified property owner as the landlord.",
+            status_code=400,
+        )
+    if landlords[0].user.status != AccountStatus.ACTIVE:
+        raise TenancyError("The landlord is not an active account.", status_code=400)
+    for party in parties:
+        if party.has_signature_authority and party.user.status != AccountStatus.ACTIVE:
+            raise TenancyError("A signatory is not an active account.", status_code=400)
+        if party.party_role == LeasePartyRole.AUTHORIZED_OCCUPANT and party.has_signature_authority:
+            raise TenancyError("An authorized occupant cannot sign the lease.", status_code=400)
+
+
+def _reservation_conflict(lease: Lease, start: date, exclusive_end: date) -> bool:
+    others = Lease.objects.filter(
+        property_id=lease.property_id,
+        status__in=LeaseStatus.OCCUPANCY_RESERVING,
+    ).exclude(pk=lease.pk)
+    for other in others:
+        if _ranges_overlap(start, exclusive_end, other.start_date, other.effective_end_date):
+            return True
+    return False
+
+
+def _ranges_overlap(start_a: date, end_a: date | None, start_b: date, end_b: date | None) -> bool:
+    """Half-open intervals. A null end is unbounded."""
+
+    if end_a is not None and start_b >= end_a:
+        return False
+    if end_b is not None and start_a >= end_b:
+        return False
+    return True
+
+
+def _lock_property_leases(property_id):
+    property_record = _lock_one_property(property_id)
+    leases = list(
+        Lease.objects.select_for_update(of=("self",))
+        .filter(property_id=property_record.id)
+        .order_by("id")
+    )
+    return property_record, leases
+
+
+def _locked_lease(lease_id) -> Lease:
+    try:
+        return Lease.objects.select_for_update(of=("self",)).get(pk=lease_id)
+    except Lease.DoesNotExist as exc:
+        raise TenancyError(NOT_FOUND, status_code=404) from exc
+
+
+def _lock_one_property(property_id) -> Property:
+    try:
+        locked = lock_properties(property_id)
+    except Property.DoesNotExist as exc:
+        raise TenancyError(NOT_FOUND, status_code=404) from exc
+    record = locked.get(property_id)
+    if record is None and locked:
+        record = next(iter(locked.values()))
+    if record is None:
+        raise TenancyError(NOT_FOUND, status_code=404)
+    return record
+
+
+def _replay_draft(actor, client_key: str, property_id):
+    key = tenancy_idempotency_key("lease_drafted", actor.id, client_key)
+    existing = TenancyEvent.objects.filter(idempotency_key=key).select_related("lease").first()
+    if existing is None or existing.lease_id is None:
+        return None
+    if existing.lease.property_id != property_id:
+        raise TenancyError(CONFLICT, status_code=409)
+    return existing.lease
+
+
+def _replay_draft_outside(actor, client_key: str, property_id):
+    try:
+        property_uuid = Property.objects.filter(pk=property_id).values_list("id", flat=True).first()
+    except (ValueError, TypeError):
+        return None
+    if property_uuid is None:
+        return None
+    try:
+        return _replay_draft(actor, client_key, property_uuid)
+    except TenancyError as exc:
+        if exc.status_code == 409:
+            raise
+        return None
+
+
+def _validate_unit(property_record: Property) -> None:
+    try:
+        validate_rentable_unit(property_record)
+    except DjangoValidationError as exc:
+        _raise_validation(exc)
+
+
+def _parse_terms(payload: dict[str, Any]) -> dict[str, Any]:
+    lease_type = payload.get("lease_type", LeaseType.RESIDENTIAL_FIXED)
+    if lease_type not in LeaseType.VALUES:
+        raise TenancyError("The lease type is invalid.", status_code=400)
+    start = _as_date(payload.get("start_date"), "The start date")
+    term_end = _as_date(payload.get("term_end_date"), "The term end date")
+    if term_end < start:
+        raise TenancyError("The term end date cannot be before the start date.", status_code=400)
+    currency = str(payload.get("rent_currency") or "KES").strip().upper()
+    if not _CURRENCY.fullmatch(currency):
+        raise TenancyError("Rent currency must be three letters.", status_code=400)
+    covenants = payload.get("special_covenants", "")
+    if not isinstance(covenants, str) or len(covenants) > MAX_COVENANT_CHARS:
+        raise TenancyError("Special covenants are invalid.", status_code=400)
+    return {
+        "lease_type": lease_type,
+        "start_date": start,
+        "term_end_date": term_end,
+        "rent_amount_minor": _positive_int(payload.get("rent_amount_minor"), "Rent"),
+        "rent_currency": currency,
+        "deposit_amount_minor": _non_negative(payload.get("deposit_amount_minor", 0), "Deposit"),
+        "service_charge_minor": _non_negative(
+            payload.get("service_charge_minor", 0), "Service charge"
+        ),
+        "payment_due_day": _bounded_int(
+            payload.get("payment_due_day", 1), "Payment due day", 1, 28
+        ),
+        "grace_period_days": _bounded_int(
+            payload.get("grace_period_days", 5), "Grace period", 0, 30
+        ),
+        "special_covenants": covenants,
+    }
+
+
+def _parse_parties(raw, property_owner) -> list[dict[str, Any]]:
+    if not isinstance(raw, list) or not raw:
+        raise TenancyError("A lease draft needs contracting parties.", status_code=400)
+    specs: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise TenancyError("Each contracting party must be an object.", status_code=400)
+        role = item.get("party_role")
+        if role not in LeasePartyRole.VALUES:
+            raise TenancyError("A contracting party role is invalid.", status_code=400)
+        user_id = _as_uuid(item.get("user_id"), "A contracting party is invalid.")
+        default_authority = role != LeasePartyRole.AUTHORIZED_OCCUPANT
+        authority = item.get("has_signature_authority", default_authority)
+        if not isinstance(authority, bool):
+            raise TenancyError("Signature authority must be true or false.", status_code=400)
+        if role == LeasePartyRole.AUTHORIZED_OCCUPANT and authority:
+            raise TenancyError("An authorized occupant cannot sign the lease.", status_code=400)
+        specs.append(
+            {
+                "user_id": user_id,
+                "party_role": role,
+                "has_signature_authority": authority,
+            }
+        )
+    landlords = [spec for spec in specs if spec["party_role"] == LeasePartyRole.LANDLORD]
+    if not landlords:
+        specs.append(
+            {
+                "user_id": property_owner.id,
+                "party_role": LeasePartyRole.LANDLORD,
+                "has_signature_authority": True,
+            }
+        )
+    elif (
+        len(landlords) != 1
+        or landlords[0]["user_id"] != property_owner.id
+        or not landlords[0]["has_signature_authority"]
+    ):
+        raise TenancyError(
+            "The landlord party must be the verified property owner.",
+            status_code=400,
+        )
+    primaries = [spec for spec in specs if spec["party_role"] == LeasePartyRole.PRIMARY_TENANT]
+    if (
+        len(primaries) != 1
+        or not primaries[0]["has_signature_authority"]
+        or primaries[0]["user_id"] == property_owner.id
+    ):
+        raise TenancyError(
+            "A lease draft needs one primary tenant who is not the property owner.",
+            status_code=400,
+        )
+    seen: set[tuple] = set()
+    for spec in specs:
+        key = (spec["user_id"], spec["party_role"])
+        if key in seen:
+            raise TenancyError("A party role is duplicated.", status_code=400)
+        seen.add(key)
+    wanted = {spec["user_id"] for spec in specs}
+    users = {user.id: user for user in User.objects.filter(id__in=wanted)}
+    if len(users) != len(wanted):
+        raise TenancyError("A contracting party does not exist.", status_code=400)
+    for spec in specs:
+        user = users[spec["user_id"]]
+        if user.status != AccountStatus.ACTIVE:
+            raise TenancyError("A contracting party is not an active account.", status_code=400)
+        spec["user"] = user
+    return specs
+
+
+def _load_application(application_id, property_record: Property, parties: list[dict[str, Any]]):
+    if application_id in (None, ""):
+        return None
+    try:
+        application = RentalApplication.objects.get(pk=application_id)
+    except RentalApplication.DoesNotExist as exc:
+        raise TenancyError("The rental application was not found.", status_code=404) from exc
+    except (ValueError, TypeError) as exc:
+        raise TenancyError("The rental application is invalid.", status_code=400) from exc
+    primary = next(
+        party for party in parties if party["party_role"] == LeasePartyRole.PRIMARY_TENANT
+    )
+    same_unit = application.property_id == property_record.id
+    same_tenant = application.applicant_id == primary["user_id"]
+    if not same_unit or not same_tenant:
+        raise TenancyError("The rental application does not match this draft.", status_code=400)
+    return application
+
+
+def _clean_client_key(value) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TenancyError("The idempotency key is invalid.", status_code=400)
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > 200:
+        raise TenancyError("The idempotency key is invalid.", status_code=400)
+    return cleaned
+
+
+def _as_date(value, label: str) -> date:
+    if isinstance(value, datetime) or not isinstance(value, date):
+        raise TenancyError(f"{label} must be a date.", status_code=400)
+    return value
+
+
+def _as_uuid(value, message: str):
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise TenancyError(message, status_code=400) from exc
+
+
+def _positive_int(value, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise TenancyError(f"{label} must be a positive number of minor units.", status_code=400)
+    return value
+
+
+def _non_negative(value, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise TenancyError(f"{label} cannot be negative.", status_code=400)
+    return value
+
+
+def _bounded_int(value, label: str, low: int, high: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise TenancyError(f"{label} is outside the allowed range.", status_code=400)
+    return value
+
+
+def _deadline_hours(value) -> int:
+    hours_ok = isinstance(value, int) and not isinstance(value, bool)
+    if not hours_ok or not 1 <= value <= MAX_DEADLINE_HOURS:
+        raise TenancyError("The signature deadline must be from 1 to 336 hours.", status_code=400)
+    return value
+
+
+def _rendered_bytes(document) -> bytes:
+    if isinstance(document, bytearray):
+        document = bytes(document)
+    if not isinstance(document, bytes) or not document:
+        raise TenancyError("The rendered lease document is required.", status_code=400)
+    if len(document) > MAX_RENDERED_BYTES:
+        raise TenancyError("The rendered lease document is too large.", status_code=400)
+    return document
+
+
+def _rendered_uri(uri: str) -> str:
+    if not isinstance(uri, str) or len(uri) > 255 or any(ord(char) < 32 for char in uri):
+        raise TenancyError("The rendered document URI is invalid.", status_code=400)
+    return uri
+
+
+def _aware_moment(moment: datetime | None) -> datetime:
+    if moment is None:
+        return timezone.now()
+    if not isinstance(moment, datetime) or timezone.is_naive(moment):
+        raise TenancyError("The clock time must be timezone-aware.", status_code=400)
+    return moment
+
+
+def _raise_validation(exc: DjangoValidationError) -> None:
+    if hasattr(exc, "message_dict"):
+        parts = []
+        for key, errors in exc.message_dict.items():
+            for error in errors:
+                parts.append(f"{key}: {error}")
+        detail = " ".join(parts)
+    else:
+        detail = " ".join(exc.messages)
+    status = 409 if STATUS_INVALID in detail or "immutable" in detail else 400
+    raise TenancyError(detail or STATUS_INVALID, status_code=status) from exc

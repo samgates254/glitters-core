@@ -171,7 +171,14 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 300
 CELERY_TASK_SOFT_TIME_LIMIT = 240
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
-CELERY_BEAT_SCHEDULE: dict[str, object] = {}
+# Approve also expires due reservations on the locked property. This sweep
+# covers a reservation that nobody tries to replace. The task is idempotent.
+CELERY_BEAT_SCHEDULE: dict[str, object] = {
+    "tenancy-expire-due-reservations": {
+        "task": "tenancy.expire_due_reservations",
+        "schedule": 15 * 60,
+    },
+}
 
 CACHES = {
     "default": {
