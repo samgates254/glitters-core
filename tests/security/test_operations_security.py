@@ -5,15 +5,13 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from django.db import connection
+from django.db import OperationalError, connection
 from django.utils import timezone
 from rest_framework.test import APIClient
 from tests.organizations_support import client_for, verified_user
 from tests.properties_support import property_body
 
-from apps.organizations.domain import MembershipStatus
-from apps.organizations.models import Organization, OrganizationMembership
-from apps.operations.domain import AgreementStatus
+from apps.operations.domain import CONFLICT, AgreementStatus
 from apps.operations.errors import OperationsError
 from apps.operations.models import ManagementAgreement, OperationsEvent
 from apps.operations.services.agreements import (
@@ -22,7 +20,9 @@ from apps.operations.services.agreements import (
     propose_agreement,
     terminate_agreement,
 )
-from apps.properties.domain import AccessOrigin, AccessStatus
+from apps.organizations.domain import MembershipStatus
+from apps.organizations.models import Organization, OrganizationMembership
+from apps.properties.domain import AccessCapability, AccessOrigin, AccessStatus
 from apps.properties.models import PropertyAccess, PropertyParty
 from apps.properties.services.records import create_property
 
@@ -268,6 +268,7 @@ def test_f01_direct_owner_authority_provenance_and_sub_delegation_blocked() -> N
 
 def test_f02_agreement_expiry_enforcement_and_boundaries() -> None:
     import datetime
+
     from apps.operations.services.agreements import (
         is_agreement_expired,
         is_grant_expired,
@@ -352,8 +353,29 @@ def test_f03_corporate_ownership_authorization_path() -> None:
         organization_id=str(holding_org.id),
     )
     prop = create_property(actor=corporate_owner, data=prop_data)
+    assert not PropertyAccess.objects.filter(property=prop).exists()
 
-    # 1. Authorized corporate rep (owner or admin) can propose management agreement
+    # Membership in the holding organization is not property authority.
+    with pytest.raises(OperationsError) as exc:
+        propose_agreement(
+            actor=corporate_owner,
+            property_id=prop.id,
+            managing_org_id=pm_firm.id,
+            valid_from=timezone.now().date(),
+        )
+    assert exc.value.status_code == 403
+    assert not PropertyAccess.objects.filter(property=prop, user=corporate_owner).exists()
+
+    PropertyAccess.objects.create(
+        property=prop,
+        user=corporate_owner,
+        capability=AccessCapability.MANAGE,
+        status=AccessStatus.ACTIVE,
+        origin=AccessOrigin.DIRECT,
+        granted_by=corporate_owner,
+    )
+
+    # An explicit direct grant, not the organization role, authorizes the proposal.
     agreement = propose_agreement(
         actor=corporate_owner,
         property_id=prop.id,
@@ -416,3 +438,47 @@ def test_f04_audit_event_bulk_update_blocked() -> None:
     event.action = "agreement.activated"
     with pytest.raises(ValueError, match="Operations events are append-only"):
         OperationsEvent.objects.bulk_update([event], ["action"])
+
+
+def test_organization_admin_without_direct_grant_cannot_propose() -> None:
+    corporate_owner = verified_user("grant.owner@example.com", "Password-123!")
+    corporate_admin = verified_user("grant.admin@example.com", "Password-123!")
+    holding_org = _create_org("Grant Holding")
+    pm_firm = _create_org("Grant PM Firm")
+    _add_member(corporate_owner, holding_org, role="owner")
+    _add_member(corporate_admin, holding_org, role="admin")
+    prop = create_property(
+        actor=corporate_owner,
+        data=property_body(
+            name="Grant Plaza",
+            management_context="organization",
+            organization_id=str(holding_org.id),
+        ),
+    )
+
+    with pytest.raises(OperationsError) as exc:
+        propose_agreement(
+            actor=corporate_admin,
+            property_id=prop.id,
+            managing_org_id=pm_firm.id,
+            valid_from=timezone.now().date(),
+        )
+    assert exc.value.status_code == 403
+    assert not PropertyAccess.objects.filter(property=prop, user=corporate_admin).exists()
+
+
+def test_propose_agreement_deadlock_returns_conflict(monkeypatch) -> None:
+    actor = verified_user("deadlock.owner@example.com", "Password-123!")
+
+    def _deadlock(*_args, **_kwargs):
+        raise OperationalError("deadlock detected")
+
+    monkeypatch.setattr("apps.operations.services.agreements.lock_properties", _deadlock)
+    with pytest.raises(OperationsError) as exc:
+        propose_agreement(
+            actor=actor,
+            property_id=uuid.uuid4(),
+            managing_org_id=uuid.uuid4(),
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.detail == CONFLICT

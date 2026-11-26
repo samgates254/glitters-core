@@ -14,6 +14,7 @@ from django.db.models.expressions import F, Func, Value
 from apps.properties.domain import HierarchyRole
 from apps.tenancy.domain import (
     INVALID_UNIT,
+    STATUS_INVALID,
     AmendmentStatus,
     AmendmentType,
     ApplicationStatus,
@@ -34,6 +35,7 @@ from apps.tenancy.domain import (
     generate_amendment_reference,
     generate_application_reference,
     generate_lease_reference,
+    lease_transition_allowed,
 )
 
 
@@ -143,28 +145,67 @@ IMMUTABLE_CONTRACT_FIELDS = {
     "created_by_id",
 }
 
+_LEASE_UPDATE_ALIASES = {
+    "property": "property_id",
+    "property_owner": "property_owner_id",
+    "managing_organization": "managing_organization_id",
+    "created_by": "created_by_id",
+}
+
+
+def _lease_update_field_names(fields) -> set[str]:
+    """Normalize FK aliases so QuerySet.update(property=...) hits the immutability guard."""
+    return {_LEASE_UPDATE_ALIASES.get(field, field) for field in fields}
+
+
+def _reject_lease_status_changes(current_statuses, proposed: str) -> None:
+    for current in current_statuses:
+        if not lease_transition_allowed(current, proposed):
+            raise ValidationError(STATUS_INVALID)
+
 
 class LeaseQuerySet(models.QuerySet):
     """QuerySet for Lease enforcing contractual immutability on executed records."""
 
     def update(self, **kwargs):
-        attempted_immutable = set(kwargs.keys()).intersection(IMMUTABLE_CONTRACT_FIELDS)
-        if attempted_immutable:
-            if self.filter(status__in=LeaseStatus.EXECUTED).exists():
-                raise ValidationError(
-                    f"Direct update of contractual fields {sorted(attempted_immutable)} is prohibited on "
-                    f"executed leases. Formal contractual variations must use LeaseAmendment."
-                )
+        normalized = _lease_update_field_names(kwargs.keys())
+        attempted_immutable = normalized.intersection(IMMUTABLE_CONTRACT_FIELDS)
+        needs_status = "status" in kwargs or bool(attempted_immutable)
+        current_statuses = []
+        if needs_status:
+            current_statuses = list(self.values_list("status", flat=True).distinct())
+        if "status" in kwargs:
+            _reject_lease_status_changes(current_statuses, kwargs["status"])
+        if attempted_immutable and any(
+            status in LeaseStatus.EXECUTED for status in current_statuses
+        ):
+            raise ValidationError(
+                f"Direct update of contractual fields {sorted(attempted_immutable)} is prohibited on "
+                "executed leases. Formal contractual variations must use LeaseAmendment."
+            )
         return super().update(**kwargs)
 
     def bulk_update(self, objs, fields, **kwargs):
-        attempted_immutable = set(fields).intersection(IMMUTABLE_CONTRACT_FIELDS)
-        if attempted_immutable:
+        normalized = _lease_update_field_names(fields)
+        attempted_immutable = normalized.intersection(IMMUTABLE_CONTRACT_FIELDS)
+        if attempted_immutable or "status" in fields:
+            current = {
+                row["id"]: row["status"]
+                for row in Lease.objects.filter(pk__in=[obj.pk for obj in objs if obj.pk]).values(
+                    "id", "status"
+                )
+            }
             for obj in objs:
-                if obj.status in LeaseStatus.EXECUTED:
+                previous = current.get(obj.pk)
+                if previous is None:
+                    continue
+                if "status" in fields and not lease_transition_allowed(previous, obj.status):
+                    raise ValidationError(STATUS_INVALID)
+                if attempted_immutable and previous in LeaseStatus.EXECUTED:
+                    fields_label = sorted(attempted_immutable)
                     raise ValidationError(
-                        f"Direct bulk_update of contractual fields {sorted(attempted_immutable)} is prohibited on "
-                        f"executed leases. Formal contractual variations must use LeaseAmendment."
+                        f"Direct bulk_update of contractual fields {fields_label} is prohibited on "
+                        "executed leases. Formal contractual variations must use LeaseAmendment."
                     )
         return super().bulk_update(objs, fields, **kwargs)
 
@@ -411,6 +452,8 @@ class Lease(models.Model):
             )
             if original:
                 orig_status = original["status"]
+                if not lease_transition_allowed(orig_status, self.status):
+                    raise ValidationError(STATUS_INVALID)
                 if orig_status in LeaseStatus.EXECUTED:
                     for field in IMMUTABLE_CONTRACT_FIELDS:
                         curr_val = getattr(self, field)

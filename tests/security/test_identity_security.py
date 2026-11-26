@@ -109,15 +109,17 @@ def test_cross_user_bearer_cannot_read_or_edit_another_profile(password) -> None
 
 
 @pytest.mark.django_db
-def test_admin_bootstrap_does_not_require_mfa_and_the_api_does(password) -> None:
+def test_staff_without_confirmed_mfa_cannot_use_admin_or_the_api(password) -> None:
     User.objects.create_superuser(email="ops@example.com", password=password)
     client = Client()
     assert client.login(username="ops@example.com", password=password)
-    admin = client.get("/admin/")
-    assert admin.status_code == 200
     api = client.get(ME)
     assert api.status_code == 403
     assert b"Multi-factor authentication is required." in api.content
+    assert client.login(username="ops@example.com", password=password)
+    admin = client.get("/admin/")
+    assert admin.status_code == 302
+    assert "/admin/login/" in admin.url
     health = client.get("/api/v1/health/live/")
     assert health.status_code == 200
 

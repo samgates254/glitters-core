@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
-
-from pathlib import Path
 
 from django.contrib.gis.geos import Polygon
 from django.core.exceptions import ValidationError
@@ -74,20 +73,58 @@ from apps.spatial.services.change_detection import (
 )
 from apps.spatial.services.lineage import traverse_entity_lineage
 from apps.spatial.services.raster_tile_server import render_raster_tile
+from apps.spatial.services.request_scope import (
+    bind_member_organization,
+    hidden_private_urns,
+    resolve_request_org_ids,
+    scope_member_orgs,
+    scope_public_or_member,
+)
+from apps.spatial.services.safe_paths import (
+    UnsafeSpatialPath,
+    resolve_raster_file,
+    resolve_tile_file,
+    resolve_tileset_document,
+)
 from apps.spatial.services.spectral_service import (
     run_spectral_index_job,
     run_terrain_analysis_job,
 )
 from apps.spatial.services.stac import (
+    search_imagery_items,
     serialize_stac_collection,
     serialize_stac_item,
-    search_imagery_items,
 )
 from apps.spatial.services.temporal import (
     get_bi_temporal_slice,
     parse_iso_datetime,
 )
 from apps.spatial.services.tileset_generator import generate_digital_twin_tileset
+from apps.spatial.throttles import SpatialComputeRateThrottle
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_request_org_ids(request) -> list[uuid.UUID]:
+    """Membership-scoped organization ids. Anonymous callers receive none."""
+    return resolve_request_org_ids(request)
+
+
+def _organization_for_urn(request, urn: str | None):
+    """Return the entity organization when the caller is an active member."""
+    from apps.organizations.models import Organization
+
+    if not urn:
+        return None
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        return None
+    entity = SpatialEntity.objects.filter(canonical_urn=urn).only("organization_id").first()
+    if entity is None or entity.organization_id is None:
+        return None
+    if entity.organization_id not in _resolve_request_org_ids(request):
+        return None
+    return Organization.objects.filter(pk=entity.organization_id).first()
 
 
 class DatasetRegistryViewSet(viewsets.ReadOnlyModelViewSet):
@@ -132,8 +169,7 @@ class SpatialEntityViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        org = getattr(self.request, "organization", None)
-        qs = SpatialEntity.objects.for_organization(org).prefetch_related(
+        qs = scope_public_or_member(SpatialEntity.objects.all(), self.request).prefetch_related(
             "external_mappings"
         )
         entity_type = self.request.query_params.get("type")
@@ -152,9 +188,8 @@ class SpatialEntityViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        org = getattr(request, "organization", None)
         entity = (
-            SpatialEntity.objects.for_organization(org)
+            scope_public_or_member(SpatialEntity.objects.all(), request)
             .filter(
                 external_mappings__provider_name=provider,
                 external_mappings__provider_external_id=external_id,
@@ -175,17 +210,23 @@ class SpatialEntityViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        org = getattr(request, "organization", None)
         try:
             depth = int(request.query_params.get("depth", 5))
         except (ValueError, TypeError):
             depth = 5
 
         try:
-            lineage_data = traverse_entity_lineage(urn, organization=org, max_depth=depth)
+            lineage_data = traverse_entity_lineage(
+                urn,
+                organization=_organization_for_urn(request, urn),
+                max_depth=depth,
+            )
             return Response(lineage_data)
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception("lineage traversal failed")
+            return Response({"error": "Lineage traversal failed."}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class BuildingViewSet(viewsets.ReadOnlyModelViewSet):
@@ -193,8 +234,7 @@ class BuildingViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        org = getattr(self.request, "organization", None)
-        qs = Building.objects.for_organization(org).prefetch_related(
+        qs = scope_public_or_member(Building.objects.all(), self.request).prefetch_related(
             "external_mappings", "dataset_version"
         )
 
@@ -269,9 +309,8 @@ class BuildingViewSet(viewsets.ReadOnlyModelViewSet):
         if not external_id.startswith("way/") and not external_id.startswith("relation/"):
             ids_to_try.extend([f"way/{external_id}", f"relation/{external_id}"])
 
-        org = getattr(request, "organization", None)
         building = (
-            Building.objects.for_organization(org)
+            scope_public_or_member(Building.objects.all(), request)
             .filter(
                 external_mappings__provider_name=provider,
                 external_mappings__provider_external_id__in=ids_to_try,
@@ -291,7 +330,7 @@ class BuildingViewSet(viewsets.ReadOnlyModelViewSet):
                 pass
 
             building = (
-                Building.objects.for_organization(org)
+                scope_public_or_member(Building.objects.all(), request)
                 .filter(
                     models.Q(canonical_urn=external_id)
                     | (models.Q(id=external_id) if is_uuid else models.Q())
@@ -351,7 +390,9 @@ class BuildingViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["get"], url_path=r"(?P<urn>urn:[^/]+)/digital-twin")
     def digital_twin_by_urn(self, request, urn=None):
         """Fetch 3D Digital Twin record and height provenance by canonical URN."""
-        building = Building.objects.filter(canonical_urn=urn).first()
+        building = scope_public_or_member(Building.objects.all(), request).filter(
+            canonical_urn=urn
+        ).first()
         if not building:
             return Response(
                 {"error": f"Building '{urn}' not found."},
@@ -401,14 +442,20 @@ class BuildingViewSet(viewsets.ReadOnlyModelViewSet):
         except (ValueError, TypeError):
             return Response({"error": "Invalid tile coordinates."}, status=status.HTTP_400_BAD_REQUEST)
 
-        org = getattr(request, "organization", None)
-        org_id = str(org.id) if org else None
+        org_ids = [str(org_id) for org_id in _resolve_request_org_ids(request)]
+        # An empty Python list becomes an untyped Postgres array and fails ANY().
+        if org_ids:
+            organization_sql = "(e.organization_id IS NULL OR e.organization_id::text = ANY(%s))"
+        else:
+            organization_sql = "e.organization_id IS NULL"
 
         as_of = request.query_params.get("as_of")
         as_was = request.query_params.get("as_was")
 
         temporal_clauses = []
-        sql_params = [zoom, tile_x, tile_y, org_id]
+        sql_params = [zoom, tile_x, tile_y]
+        if org_ids:
+            sql_params.append(org_ids)
 
         if as_was:
             try:
@@ -461,7 +508,7 @@ class BuildingViewSet(viewsets.ReadOnlyModelViewSet):
             LEFT JOIN spatial_identity_mapping m ON m.entity_id = e.id
             CROSS JOIN tile_bounds tb
             WHERE v.status = 'PUBLISHED'
-              AND (e.organization_id IS NULL OR e.organization_id = %s)
+              AND {organization_sql}
               AND {temporal_sql}
               AND ST_Intersects(ST_Transform(b.geom, 3857), tb.geom_3857)
         )
@@ -483,8 +530,7 @@ class LandParcelViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        org = getattr(self.request, "organization", None)
-        return LandParcel.objects.for_organization(org).prefetch_related(
+        return scope_public_or_member(LandParcel.objects.all(), self.request).prefetch_related(
             "external_mappings"
         )
 
@@ -492,10 +538,13 @@ class LandParcelViewSet(viewsets.ReadOnlyModelViewSet):
 class EntityLineageViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = EntityLineage.objects.all()
     serializer_class = EntityLineageSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        hidden = hidden_private_urns(self.request)
+        qs = super().get_queryset().exclude(predecessor_urn__in=hidden).exclude(
+            successor_urn__in=hidden
+        )
         urn = self.request.query_params.get("urn")
         if urn:
             qs = qs.filter(predecessor_urn=urn) | qs.filter(successor_urn=urn)
@@ -511,17 +560,23 @@ class EntityLineageViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        org = getattr(request, "organization", None)
         try:
             depth = int(request.query_params.get("depth", 5))
         except (ValueError, TypeError):
             depth = 5
 
         try:
-            tree_data = traverse_entity_lineage(target_urn, organization=org, max_depth=depth)
+            tree_data = traverse_entity_lineage(
+                target_urn,
+                organization=_organization_for_urn(request, target_urn),
+                max_depth=depth,
+            )
             return Response(tree_data)
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception("lineage traversal failed")
+            return Response({"error": "Lineage traversal failed."}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=["get"], url_path="tree")
     def tree_query(self, request):
@@ -530,105 +585,123 @@ class EntityLineageViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class DigitalTwinViewSet(viewsets.ModelViewSet):
-    """
-    OGC 3D Tiles 1.1 Digital Twin Streaming API.
-    Serves tileset.json, binary GLB tiles, and triggers volumetric reconstructions.
-    """
+    """Authenticated 3D Tiles API. Stored paths cannot leave the tileset root."""
 
     queryset = DigitalTwinGeneration.objects.all()
     serializer_class = DigitalTwinGenerationSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_permissions(self):
+        if self.action in {"create", "update", "partial_update", "destroy"}:
+            return [permissions.IsAdminUser()]
+        return [permissions.IsAuthenticated()]
+
+    def get_throttles(self):
+        if self.action == "generate":
+            return [SpatialComputeRateThrottle()]
+        return super().get_throttles()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return qs.none()
+        org_ids = _resolve_request_org_ids(self.request)
+        foreign_private = DigitalTwinAsset.objects.filter(
+            generation_id=models.OuterRef("pk"),
+            entity__organization__isnull=False,
+        ).exclude(entity__organization_id__in=org_ids)
+        return qs.exclude(models.Exists(foreign_private))
 
     @action(detail=False, methods=["post"], url_path="generate")
     def generate(self, request):
-        """
-        Triggers 3D digital twin tileset reconstruction for an area or building subset.
-        Payload:
-        {
-            "bbox": [min_lon, min_lat, max_lon, max_lat],
-            "limit": 500
-        }
-        """
+        """Rebuild a tileset for buildings the caller is allowed to see inside bbox."""
         bbox = request.data.get("bbox")
-        limit = int(request.data.get("limit", 2000))
-
-        qs = Building.objects.filter(geom__isnull=False)
-        if bbox and len(bbox) == 4:
-            poly = Polygon.from_bbox(bbox)
-            qs = qs.filter(geom__intersects=poly)
-        else:
-            poly = Polygon.from_bbox((39.65, -4.08, 39.70, -4.04))
-            qs = qs.filter(geom__intersects=poly)
-
-        qs = qs[:limit]
+        try:
+            limit = int(request.data.get("limit", 500))
+        except (TypeError, ValueError):
+            return Response({"error": "limit must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+        limit = max(1, min(limit, 500))
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return Response(
+                {"error": "bbox is required and must be [min_lon, min_lat, max_lon, max_lat]."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            poly = Polygon.from_bbox(tuple(float(value) for value in bbox))
+        except (TypeError, ValueError):
+            return Response({"error": "bbox values must be numeric."}, status=status.HTTP_400_BAD_REQUEST)
+        poly.srid = 4326
+        qs = scope_public_or_member(Building.objects.all(), request).filter(
+            geom__isnull=False,
+            geom__intersects=poly,
+        )[:limit]
         if not qs.exists():
             return Response(
                 {"error": "No building footprints matched the specified envelope."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        gen = generate_digital_twin_tileset(qs)
+        logger.info("digital twin generate requested by user %s", request.user.pk)
+        try:
+            gen = generate_digital_twin_tileset(qs)
+        except Exception:
+            logger.exception("digital twin generation failed")
+            return Response(
+                {"error": "Digital twin generation failed."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
         return Response(
             DigitalTwinGenerationSerializer(gen).data,
             status=status.HTTP_201_CREATED,
         )
 
+    def _tileset_file(self, generation):
+        try:
+            return resolve_tileset_document(generation.tileset_path)
+        except UnsafeSpatialPath:
+            logger.warning("rejected tileset path for generation %s", generation.id)
+            raise Http404("Tileset file not found on disk.") from None
+
     @action(detail=True, methods=["get"], url_path="tileset")
     def tileset(self, request, pk=None):
-        """Serves standard 3D Tiles 1.1 tileset.json."""
-        gen = self.get_object()
-        if not gen.tileset_path or not Path(gen.tileset_path).exists():
-            return Response(
-                {"error": "Tileset file not found on disk."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        tileset_data = Path(gen.tileset_path).read_text(encoding="utf-8")
+        """Serve tileset.json from the configured tileset root."""
+        generation = self.get_object()
+        tileset_data = self._tileset_file(generation).read_text(encoding="utf-8")
         response = HttpResponse(tileset_data, content_type="application/json")
-        response["Access-Control-Allow-Origin"] = "*"
-        response["Cache-Control"] = "public, max-age=3600"
+        response["Cache-Control"] = "private, max-age=3600"
         return response
 
     @action(detail=True, methods=["get"], url_path=r"tiles/(?P<tile_name>[^/]+)")
     def tile(self, request, pk=None, tile_name=None):
-        """Serves glTF 2.0 Binary (.glb) tile."""
-        gen = self.get_object()
-        tile_path = Path(gen.tileset_path).parent / "tiles" / tile_name
-        if not tile_path.exists():
-            return Response(
-                {"error": f"Tile '{tile_name}' not found."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        response = FileResponse(open(tile_path, "rb"), content_type="model/gltf-binary")
-        response["Access-Control-Allow-Origin"] = "*"
-        response["Cache-Control"] = "public, max-age=86400"
+        """Serve one GLB tile stored beside a contained tileset."""
+        generation = self.get_object()
+        try:
+            tile_path = resolve_tile_file(generation.tileset_path, tile_name or "")
+        except UnsafeSpatialPath:
+            logger.warning("rejected tile path for generation %s", generation.id)
+            return Response({"error": "Tile not found."}, status=status.HTTP_404_NOT_FOUND)
+        response = FileResponse(tile_path.open("rb"), content_type="model/gltf-binary")
+        response["Cache-Control"] = "private, max-age=86400"
         return response
 
     @action(detail=False, methods=["get"], url_path="active-tileset")
     def active_tileset(self, request):
-        """
-        Returns the latest completed 3D tileset or generates one on the fly for Mombasa Island.
-        """
-        gen = (
-            DigitalTwinGeneration.objects.filter(status=DigitalTwinStatus.COMPLETED)
-            .order_by("-created_at")
-            .first()
-        )
-        if not gen or not gen.tileset_path or not Path(gen.tileset_path).exists():
-            qs = Building.objects.filter(geom__isnull=False)[:250]
-            gen = generate_digital_twin_tileset(qs)
-
-        tileset_data = Path(gen.tileset_path).read_text(encoding="utf-8")
-        tileset_json = json.loads(tileset_data)
-        tileset_json["root"]["content"]["uri"] = (
-            f"/api/v1/spatial/digital-twins/{gen.id}/tiles/tile_0.glb"
-        )
-
-        response = HttpResponse(json.dumps(tileset_json), content_type="application/json")
-        response["Access-Control-Allow-Origin"] = "*"
-        response["Cache-Control"] = "public, max-age=3600"
-        return response
+        """Return the latest visible completed tileset. This GET does not generate one."""
+        generations = self.get_queryset().filter(status=DigitalTwinStatus.COMPLETED).order_by("-created_at")
+        for generation in generations.iterator():
+            try:
+                path = resolve_tileset_document(generation.tileset_path)
+            except UnsafeSpatialPath:
+                continue
+            tileset_json = json.loads(path.read_text(encoding="utf-8"))
+            content = tileset_json.get("root", {}).get("content")
+            if isinstance(content, dict):
+                content["uri"] = f"/api/v1/spatial/digital-twins/{generation.id}/tiles/tile_0.glb"
+            response = HttpResponse(json.dumps(tileset_json), content_type="application/json")
+            response["Cache-Control"] = "private, max-age=3600"
+            return response
+        raise Http404("No completed tileset is available.")
 
 
 def spatial_health_check(request):
@@ -763,12 +836,11 @@ class RasterAssetViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
-        if user and user.is_authenticated:
-            org_ids = _resolve_request_org_ids(self.request)
-            foreign_asset_ids = ChangeEvidence.objects.exclude(
-                candidate__run__project__organization_id__in=org_ids
-            ).filter(derived_diff_asset__isnull=False).values_list("derived_diff_asset_id", flat=True)
-            qs = qs.exclude(id__in=foreign_asset_ids)
+        org_ids = _resolve_request_org_ids(self.request) if user and user.is_authenticated else []
+        evidence = ChangeEvidence.objects.filter(derived_diff_asset__isnull=False)
+        if org_ids:
+            evidence = evidence.exclude(candidate__run__project__organization_id__in=org_ids)
+        qs = qs.exclude(id__in=evidence.values_list("derived_diff_asset_id", flat=True))
 
         asset_key = self.request.query_params.get("asset_key")
         if asset_key:
@@ -799,13 +871,13 @@ class RasterAssetViewSet(viewsets.ReadOnlyModelViewSet):
     def download(self, request, pk=None):
         asset = self.get_object()
         self._assert_raster_access(asset, request)
-        file_path = Path(asset.storage_path)
-        if not file_path.exists():
-            raise Http404(f"Raster file for asset {asset.id} does not exist on disk.")
+        try:
+            file_path = resolve_raster_file(asset.storage_path)
+        except UnsafeSpatialPath as exc:
+            raise Http404("Raster file not found.") from exc
 
-        response = FileResponse(open(file_path, "rb"), content_type=asset.mime_type)
+        response = FileResponse(file_path.open("rb"), content_type=asset.mime_type)
         response["Content-Disposition"] = f'attachment; filename="{file_path.name}"'
-        response["Access-Control-Allow-Origin"] = "*"
         return response
 
     def tile(self, request, pk=None, z=None, x=None, y=None, asset=None):
@@ -813,6 +885,10 @@ class RasterAssetViewSet(viewsets.ReadOnlyModelViewSet):
         if asset is None:
             asset = self.get_object()
         self._assert_raster_access(asset, request)
+        try:
+            resolve_raster_file(asset.storage_path)
+        except UnsafeSpatialPath as exc:
+            raise Http404("Raster file not found.") from exc
         try:
             z_int = int(z)
             x_int = int(x)
@@ -824,7 +900,6 @@ class RasterAssetViewSet(viewsets.ReadOnlyModelViewSet):
 
         png_bytes = render_raster_tile(asset, z=z_int, x=x_int, y=y_int)
         response = HttpResponse(png_bytes, content_type="image/png")
-        response["Access-Control-Allow-Origin"] = "*"
         response["Cache-Control"] = "public, max-age=86400, immutable"
         return response
 
@@ -836,7 +911,8 @@ class RasterAssetViewSet(viewsets.ReadOnlyModelViewSet):
     def tile_by_key(self, request, asset_key=None, z=None, x=None, y=None):
         """Serves tile for the latest RasterAsset matching asset_key (e.g. visual, ndvi, hillshade)."""
         asset = (
-            RasterAsset.objects.filter(asset_key=asset_key.lower())
+            self.get_queryset()
+            .filter(asset_key=asset_key.lower())
             .order_by("-created_at")
             .first()
         )
@@ -846,12 +922,31 @@ class RasterAssetViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class RasterProcessingJobViewSet(viewsets.ModelViewSet):
-    """API for triggering spectral indices and terrain analysis jobs and querying their execution status."""
-    queryset = RasterProcessingJob.objects.select_related("input_item", "output_asset").all().order_by("-created_at")
+    """Authenticated raster jobs scoped to the caller's organizations."""
+    queryset = RasterProcessingJob.objects.select_related(
+        "input_item", "output_asset", "organization"
+    ).all().order_by("-created_at")
     serializer_class = RasterProcessingJobSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_throttles(self):
+        if self.action == "create":
+            return [SpatialComputeRateThrottle()]
+        return super().get_throttles()
+
+    def get_queryset(self):
+        return scope_member_orgs(super().get_queryset(), self.request, "organization_id")
 
     def create(self, request, *args, **kwargs):
+        from apps.organizations.models import Organization
+
+        org_ids = _resolve_request_org_ids(request)
+        if len(org_ids) != 1:
+            return Response(
+                {"error": "organization_id must select one of your organizations."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        organization = Organization.objects.get(pk=org_ids[0])
         item_id = request.data.get("item_id")
         operation = str(request.data.get("operation", "ndvi")).lower()
         parameters = request.data.get("parameters", {})
@@ -881,71 +976,30 @@ class RasterProcessingJobViewSet(viewsets.ModelViewSet):
                     status=400,
                 )
 
+            if job.organization_id != organization.id:
+                job.organization = organization
+                job.save(update_fields=["organization", "updated_at"])
             serializer = self.get_serializer(job)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-        except Exception as err:
-            return Response({"error": str(err)}, status=500)
-
-
-def _resolve_request_org_ids(request) -> list[uuid.UUID]:
-    """Resolves organization IDs the caller is permitted to access."""
-    user = getattr(request, "user", None)
-    if not user or not user.is_authenticated:
-        req_org = getattr(request, "organization", None)
-        if req_org:
-            return [req_org.id if hasattr(req_org, "id") else uuid.UUID(str(req_org))]
-        return []
-
-    from apps.organizations.domain import MembershipStatus
-    from apps.organizations.models import OrganizationMembership
-
-    member_org_ids = list(
-        OrganizationMembership.objects.filter(
-            user=user,
-            status=MembershipStatus.ACTIVE,
-        ).values_list("organization_id", flat=True)
-    )
-
-    req_org = getattr(request, "organization", None)
-    if req_org:
-        req_org_id = req_org.id if hasattr(req_org, "id") else uuid.UUID(str(req_org))
-        if req_org_id not in member_org_ids:
-            raise exceptions.PermissionDenied("Cross-organization access denied.")
-        return [req_org_id]
-
-    user_org = getattr(user, "organization", None)
-    if user_org:
-        user_org_id = user_org.id if hasattr(user_org, "id") else uuid.UUID(str(user_org))
-        if user_org_id not in member_org_ids:
-            raise exceptions.PermissionDenied("Cross-organization access denied.")
-        return [user_org_id]
-
-    org_param = request.query_params.get("organization_id") or request.headers.get("X-Organization-Id")
-    if org_param:
-        try:
-            target_id = uuid.UUID(str(org_param))
-        except (ValueError, TypeError):
-            raise exceptions.ValidationError("Invalid organization ID.")
-        if target_id not in member_org_ids:
-            raise exceptions.PermissionDenied("Cross-organization access denied.")
-        return [target_id]
-
-    return member_org_ids
+        except Exception:
+            logger.exception("raster processing failed")
+            return Response({"error": "Raster processing failed."}, status=500)
 
 
 class ChangeDetectionProjectViewSet(viewsets.ModelViewSet):
     """API for managing Change Detection Projects with organization isolation."""
     queryset = ChangeDetectionProject.objects.select_related("organization").all().order_by("-created_at")
     serializer_class = ChangeDetectionProjectSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_throttles(self):
+        if self.action == "create_run":
+            return [SpatialComputeRateThrottle()]
+        return super().get_throttles()
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if user and user.is_authenticated:
-            org_ids = _resolve_request_org_ids(self.request)
-            qs = qs.filter(organization_id__in=org_ids)
+        qs = scope_member_orgs(super().get_queryset(), self.request, "organization_id")
         org_param = self.request.query_params.get("organization") or self.request.query_params.get("organization_id")
         if org_param:
             try:
@@ -954,6 +1008,9 @@ class ChangeDetectionProjectViewSet(viewsets.ModelViewSet):
             except ValueError:
                 qs = qs.filter(organization__slug=org_param)
         return qs
+
+    def perform_create(self, serializer):
+        bind_member_organization(self.request, serializer)
 
     @action(detail=True, methods=["post"], url_path="runs")
     def create_run(self, request, pk=None):
@@ -988,8 +1045,12 @@ class ChangeDetectionProjectViewSet(viewsets.ModelViewSet):
             serializer = ChangeDetectionRunSerializer(run)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-        except Exception as err:
-            return Response({"error": str(err)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception("change detection run failed")
+            return Response(
+                {"error": "Change detection run failed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     @action(detail=True, methods=["get"], url_path="runs")
     def list_runs(self, request, pk=None):
@@ -1003,17 +1064,10 @@ class ChangeDetectionRunViewSet(viewsets.ReadOnlyModelViewSet):
     """API for inspecting change detection runs, candidates, and statistical summaries."""
     queryset = ChangeDetectionRun.objects.select_related("project", "baseline_item", "comparison_item").all().order_by("-created_at")
     serializer_class = ChangeDetectionRunSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if user and user.is_authenticated:
-            org_ids = _resolve_request_org_ids(self.request)
-            qs = qs.filter(project__organization_id__in=org_ids)
-        elif self.request.query_params.get("organization_id"):
-            qs = qs.filter(project__organization_id=self.request.query_params.get("organization_id"))
-        return qs
+        return scope_member_orgs(super().get_queryset(), self.request, "project__organization_id")
 
     @action(detail=True, methods=["get"], url_path="candidates")
     def candidates(self, request, pk=None):
@@ -1089,16 +1143,12 @@ class ChangeCandidateViewSet(viewsets.ReadOnlyModelViewSet):
     """API for querying individual change candidates, evidence dossiers, and submitting human reviews."""
     queryset = ChangeCandidate.objects.select_related("run", "associated_building").prefetch_related("evidence", "reviews").all().order_by("-detection_confidence", "-area_sqm")
     serializer_class = ChangeCandidateSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if user and user.is_authenticated:
-            org_ids = _resolve_request_org_ids(self.request)
-            qs = qs.filter(run__project__organization_id__in=org_ids)
-        elif self.request.query_params.get("organization_id"):
-            qs = qs.filter(run__project__organization_id=self.request.query_params.get("organization_id"))
+        qs = scope_member_orgs(
+            super().get_queryset(), self.request, "run__project__organization_id"
+        )
 
         category = self.request.query_params.get("category")
         if category:
@@ -1142,8 +1192,12 @@ class ChangeCandidateViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except ValidationError as err:
             return Response({"error": str(err)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as err:
-            return Response({"error": str(err)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            logger.exception("change candidate review failed")
+            return Response(
+                {"error": "Change candidate review failed."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
     @action(detail=True, methods=["get"], url_path="evidence")
     def evidence(self, request, pk=None):
@@ -1179,14 +1233,10 @@ class SpatialAnalysisProjectViewSet(viewsets.ModelViewSet):
     """API for managing analytical projects across bounded AOIs."""
     queryset = SpatialAnalysisProject.objects.select_related("organization").prefetch_related("runs").all().order_by("-created_at")
     serializer_class = SpatialAnalysisProjectSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if user and user.is_authenticated:
-            org_ids = _resolve_request_org_ids(self.request)
-            qs = qs.filter(organization_id__in=org_ids)
+        qs = scope_member_orgs(super().get_queryset(), self.request, "organization_id")
         org_param = self.request.query_params.get("organization") or self.request.query_params.get("organization_id")
         if org_param:
             try:
@@ -1197,24 +1247,22 @@ class SpatialAnalysisProjectViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        user = self.request.user if self.request.user.is_authenticated else None
-        serializer.save(created_by=user)
+        bind_member_organization(self.request, serializer)
 
 
 class SpatialAnalysisRunViewSet(viewsets.ModelViewSet):
     """API for configuring, executing, and monitoring spatial analytical pipeline runs."""
     queryset = SpatialAnalysisRun.objects.select_related("project", "model_version").prefetch_related("results").all().order_by("-created_at")
     serializer_class = SpatialAnalysisRunSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_throttles(self):
+        if self.action == "execute":
+            return [SpatialComputeRateThrottle()]
+        return super().get_throttles()
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if user and user.is_authenticated:
-            org_ids = _resolve_request_org_ids(self.request)
-            qs = qs.filter(project__organization_id__in=org_ids)
-        elif self.request.query_params.get("organization_id"):
-            qs = qs.filter(project__organization_id=self.request.query_params.get("organization_id"))
+        qs = scope_member_orgs(super().get_queryset(), self.request, "project__organization_id")
 
         project_id = self.request.query_params.get("project_id") or self.request.query_params.get("project")
         if project_id:
@@ -1225,8 +1273,10 @@ class SpatialAnalysisRunViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        user = self.request.user if self.request.user.is_authenticated else None
-        serializer.save(created_by=user)
+        project = serializer.validated_data.get("project")
+        if project is not None and project.organization_id not in _resolve_request_org_ids(self.request):
+            raise exceptions.PermissionDenied("Cross-organization access denied.")
+        serializer.save(created_by=self.request.user)
 
     @action(detail=True, methods=["post"], url_path="execute")
     def execute(self, request, pk=None):
@@ -1235,9 +1285,10 @@ class SpatialAnalysisRunViewSet(viewsets.ModelViewSet):
             executed_run = execute_spatial_analysis_run(run)
             serializer = self.get_serializer(executed_run)
             return Response(serializer.data, status=status.HTTP_200_OK)
-        except Exception as err:
+        except Exception:
+            logger.exception("spatial analysis execution failed")
             return Response(
-                {"error": str(err), "status": run.status, "error_details": run.error_details},
+                {"error": "Spatial analysis execution failed."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -1253,16 +1304,12 @@ class SpatialAnalysisResultViewSet(viewsets.ReadOnlyModelViewSet):
     """API for querying individual spatial intelligence results and dossiers."""
     queryset = SpatialAnalysisResult.objects.select_related("run", "associated_building", "raster_asset").prefetch_related("evidence").all().order_by("-confidence", "-score")
     serializer_class = SpatialAnalysisResultSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if user and user.is_authenticated:
-            org_ids = _resolve_request_org_ids(self.request)
-            qs = qs.filter(run__project__organization_id__in=org_ids)
-        elif self.request.query_params.get("organization_id"):
-            qs = qs.filter(run__project__organization_id=self.request.query_params.get("organization_id"))
+        qs = scope_member_orgs(
+            super().get_queryset(), self.request, "run__project__organization_id"
+        )
 
         run_id = self.request.query_params.get("run_id") or self.request.query_params.get("run")
         if run_id:
@@ -1307,16 +1354,10 @@ class SpatialScenarioViewSet(viewsets.ModelViewSet):
     """API for creating, evaluating, and comparing spatial intelligence scenarios."""
     queryset = SpatialScenario.objects.select_related("project", "baseline_run", "comparison_run").all().order_by("-created_at")
     serializer_class = SpatialScenarioSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if user and user.is_authenticated:
-            org_ids = _resolve_request_org_ids(self.request)
-            qs = qs.filter(project__organization_id__in=org_ids)
-        elif self.request.query_params.get("organization_id"):
-            qs = qs.filter(project__organization_id=self.request.query_params.get("organization_id"))
+        qs = scope_member_orgs(super().get_queryset(), self.request, "project__organization_id")
 
         project_id = self.request.query_params.get("project_id") or self.request.query_params.get("project")
         if project_id:
@@ -1324,8 +1365,10 @@ class SpatialScenarioViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        user = self.request.user if self.request.user.is_authenticated else None
-        serializer.save(created_by=user)
+        project = serializer.validated_data.get("project")
+        if project is not None and project.organization_id not in _resolve_request_org_ids(self.request):
+            raise exceptions.PermissionDenied("Cross-organization access denied.")
+        serializer.save(created_by=self.request.user)
 
     @action(detail=True, methods=["get"], url_path="compare")
     def compare(self, request, pk=None):

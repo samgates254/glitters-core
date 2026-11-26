@@ -11,9 +11,12 @@ Validates:
 import uuid
 import pytest
 from django.contrib.gis.geos import Point, Polygon
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.organizations.models import Organization
+from apps.identity.models import User
+from apps.organizations.domain import MembershipSource, MembershipStatus, Role
+from apps.organizations.models import Organization, OrganizationMembership
 from apps.spatial.domain import (
     EvidenceLabel,
     SpatialAnalysisRunStatus,
@@ -31,8 +34,10 @@ from apps.spatial.models import (
 
 
 @pytest.fixture
-def api_client():
-    return APIClient()
+def api_client(setup_analytics_data):
+    client = APIClient()
+    client.force_authenticate(user=setup_analytics_data["user_a"])
+    return client
 
 
 @pytest.fixture
@@ -42,6 +47,18 @@ def setup_analytics_data(db):
         display_name="Mombasa Planning",
         slug="mombasa-planning",
         organization_type="agency",
+    )
+    user_a = User.objects.create_user(
+        email="analytics-reader@example.com",
+        password="SecurePassword123!",
+    )
+    OrganizationMembership.objects.create(
+        organization=org_a,
+        user=user_a,
+        role=Role.OWNER,
+        status=MembershipStatus.ACTIVE,
+        source=MembershipSource.CREATOR,
+        joined_at=timezone.now(),
     )
     org_b = Organization.objects.create(
         legal_name="Kwale County Urban Board",
@@ -130,6 +147,7 @@ def setup_analytics_data(db):
 
     return {
         "org_a": org_a,
+        "user_a": user_a,
         "org_b": org_b,
         "project_a": project_a,
         "project_b": project_b,
@@ -146,9 +164,9 @@ class TestSpatialAnalyticsAPI:
         resp = api_client.get("/api/v1/spatial/spatial-analysis/projects/")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["count"] >= 2
+        assert data["count"] == 1
         names = [p["name"] for p in data["results"]]
-        assert "Mombasa Urban Growth & Suitability 2026" in names
+        assert names == ["Mombasa Urban Growth & Suitability 2026"]
 
     def test_project_multi_tenancy_filtering(self, api_client, setup_analytics_data):
         org_a = setup_analytics_data["org_a"]

@@ -528,7 +528,7 @@ requires-dist = [
     { name = "django-environ", specifier = ">=0.11" },
     { name = "djangorestframework", specifier = ">=3.15.2" },
     { name = "drf-spectacular", specifier = ">=0.28" },
-    { name = "glitters-geospatial-engine", path = "/home/mr-robot/Projects/glitters-engines/glitters_geospatial_engine/dist/glitters_geospatial_engine-1.1.0-py3-none-any.whl" },
+    { name = "glitters-geospatial-engine", path = "vendor/wheels/glitters_geospatial_engine-1.1.0-py3-none-any.whl" },
     { name = "gunicorn", specifier = ">=23" },
     { name = "pillow", specifier = ">=13.0.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
@@ -548,7 +548,7 @@ dev = [
 [[package]]
 name = "glitters-geospatial-engine"
 version = "1.1.0"
-source = { path = "/home/mr-robot/Projects/glitters-engines/glitters_geospatial_engine/dist/glitters_geospatial_engine-1.1.0-py3-none-any.whl" }
+source = { path = "vendor/wheels/glitters_geospatial_engine-1.1.0-py3-none-any.whl" }
 dependencies = [
     { name = "geopandas" },
     { name = "numpy" },

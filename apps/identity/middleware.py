@@ -35,7 +35,8 @@ class ActiveAccountMiddleware:
     def _block_reason(self, request, user) -> str | None:
         if getattr(user, "status", AccountStatus.ACTIVE) != AccountStatus.ACTIVE:
             return ACCOUNT_BLOCKED
-        if request.path.startswith("/api/") and (user.is_staff or user.is_superuser):
+        privileged_surface = request.path.startswith("/api/") or request.path.startswith("/admin/")
+        if privileged_surface and (user.is_staff or user.is_superuser):
             if not user.has_confirmed_mfa():
                 return "Multi-factor authentication is required."
         return None
