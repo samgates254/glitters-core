@@ -365,7 +365,7 @@ def test_tenant_and_unempowered_agent_cannot_terminate() -> None:
         property_id=prop.id,
         managing_org_id=organization.id,
         can_execute_leases=False,
-        valid_from=timezone.localdate(),
+        valid_from=timezone.now().date(),
     )
     accepted = accept_agreement(actor=manager, agreement_id=proposed.id)
     activate_agreement(actor=owner, agreement_id=accepted.id)

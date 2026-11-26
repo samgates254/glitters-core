@@ -92,7 +92,7 @@ def _agreement(owner, agent, prop, organization, *, execute: bool = False):
         property_id=prop.id,
         managing_org_id=organization.id,
         can_execute_leases=execute,
-        valid_from=timezone.localdate(),
+        valid_from=timezone.now().date(),
     )
     accepted = accept_agreement(actor=agent, agreement_id=proposed.id)
     return activate_agreement(actor=owner, agreement_id=accepted.id)
