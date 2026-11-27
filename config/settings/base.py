@@ -185,6 +185,9 @@ GLITTERS_REMOTE_RENDER_ENABLED = env.bool("GLITTERS_REMOTE_RENDER_ENABLED", defa
 GLITTERS_COMPUTE_EAGER = env.bool("GLITTERS_COMPUTE_EAGER", default=True)
 GLITTERS_COMPUTE_MAX_BYTES = env.int("GLITTERS_COMPUTE_MAX_BYTES", default=2_000_000)
 GLITTERS_COMPUTE_ROOT = env("GLITTERS_COMPUTE_ROOT", default="")
+# Local disk quota for organization geospatial files. This is not a cloud bill.
+GLITTERS_ASSET_QUOTA_BYTES = env.int("GLITTERS_ASSET_QUOTA_BYTES", default=64_000_000)
+GLITTERS_ASSET_MAX_BYTES = env.int("GLITTERS_ASSET_MAX_BYTES", default=8_000_000)
 
 CACHES = {
     "default": {

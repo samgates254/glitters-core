@@ -1569,7 +1569,28 @@ class GeospatialAsset(models.Model):
     """One organization file. The storage key is relative and is not an API field."""
 
     KIND_CHOICES = [("source", "Source"), ("derived", "Derived")]
-    PROVENANCE_CHOICES = [("USER-SUPPLIED", "User supplied"), ("MODELLED", "Modelled")]
+    PROVENANCE_CHOICES = [
+        ("USER-SUPPLIED", "User supplied"),
+        ("MODELLED", "Modelled"),
+        ("DOWNLOADED", "Downloaded"),
+    ]
+    ASSET_TYPE_CHOICES = [
+        ("gltf", "glTF"),
+        ("glb", "glTF binary"),
+        ("dem", "DEM"),
+        ("cog", "COG"),
+        ("vector", "Vector"),
+        ("terrain", "Terrain"),
+        ("3dtiles", "3D Tiles"),
+        ("pointcloud", "Point cloud"),
+        ("report", "Report"),
+    ]
+    STATUS_CHOICES = [
+        ("stored", "Stored"),
+        ("processing", "Processing"),
+        ("published", "Published"),
+        ("deleted", "Deleted"),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(
@@ -1588,6 +1609,34 @@ class GeospatialAsset(models.Model):
     sha256 = models.CharField(max_length=64)
     storage_key = models.CharField(max_length=300, blank=True, default="")
     provenance = models.CharField(max_length=32, choices=PROVENANCE_CHOICES)
+    asset_type = models.CharField(max_length=16, choices=ASSET_TYPE_CHOICES, default="gltf")
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="stored")
+    version = models.PositiveIntegerField(default=1)
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="child_versions",
+    )
+    scene = models.ForeignKey(
+        GeospatialScene,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="geospatial_assets",
+    )
+    analysis_project = models.ForeignKey(
+        SpatialAnalysisProject,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="geospatial_assets",
+    )
+    license_identifier = models.CharField(max_length=80, blank=True, default="")
+    attribution = models.CharField(max_length=240, blank=True, default="")
+    source_note = models.CharField(max_length=400, blank=True, default="")
+    deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -1595,6 +1644,8 @@ class GeospatialAsset(models.Model):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["organization", "-created_at"], name="spatial_asset_org_idx"),
+            models.Index(fields=["organization", "asset_type"], name="spatial_asset_type_idx"),
+            models.Index(fields=["organization", "status"], name="spatial_asset_status_idx"),
         ]
         constraints = [
             models.CheckConstraint(
@@ -1602,13 +1653,71 @@ class GeospatialAsset(models.Model):
                 name="spatial_asset_kind_valid",
             ),
             models.CheckConstraint(
-                condition=models.Q(provenance__in=["USER-SUPPLIED", "MODELLED"]),
+                condition=models.Q(provenance__in=["USER-SUPPLIED", "MODELLED", "DOWNLOADED"]),
                 name="spatial_asset_prov_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    asset_type__in=[
+                        "gltf",
+                        "glb",
+                        "dem",
+                        "cog",
+                        "vector",
+                        "terrain",
+                        "3dtiles",
+                        "pointcloud",
+                        "report",
+                    ]
+                ),
+                name="spatial_asset_type_ok",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(status__in=["stored", "processing", "published", "deleted"]),
+                name="spatial_asset_status_ok",
             ),
         ]
 
     def __str__(self) -> str:
         return f"{self.kind} {self.sha256[:12]}"
+
+
+class GeospatialAssetEvent(models.Model):
+    """Append-only asset audit. Messages must not contain paths or secrets."""
+
+    ACTION_CHOICES = [
+        ("stored", "Stored"),
+        ("published", "Published"),
+        ("downloaded", "Downloaded"),
+        ("deleted", "Deleted"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    asset = models.ForeignKey(
+        GeospatialAsset, on_delete=models.CASCADE, related_name="asset_events"
+    )
+    organization = models.ForeignKey(
+        Organization, on_delete=models.PROTECT, related_name="geospatial_asset_events"
+    )
+    action = models.CharField(max_length=16, choices=ACTION_CHOICES)
+    message = models.CharField(max_length=300)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "spatial_geospatial_asset_event"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["organization", "created_at"], name="spatial_asset_evt_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(action__in=["stored", "published", "downloaded", "deleted"]),
+                name="spatial_asset_evt_ok",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.action} {self.message[:40]}"
 
 
 class ComputeEntitlement(models.Model):

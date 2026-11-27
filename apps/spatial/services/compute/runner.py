@@ -15,6 +15,7 @@ from django.db.models import Count, Sum
 from django.utils import timezone
 
 from apps.spatial.models import ComputeEntitlement, ComputeJob, ComputeJobEvent, GeospatialAsset
+from apps.spatial.services.asset_registry import assert_room, store_bytes
 from apps.spatial.services.compute.contracts import (
     ACTUAL_NOTE,
     ASSET_DERIVED,
@@ -38,6 +39,7 @@ from apps.spatial.services.compute.contracts import (
     SIMULATE_FAIL,
     SIMULATE_FAIL_ONCE,
     SUCCEEDED,
+    SURFACE_OPERATIONS,
     TERMINAL_STATES,
     VERIFYING,
     ComputeError,
@@ -63,7 +65,8 @@ from apps.spatial.services.compute.providers import (
     open_remote_render,
     provider_catalog,
 )
-from apps.spatial.services.compute.storage import file_exists, read_bytes, remove_file, write_bytes
+from apps.spatial.services.compute.storage import file_exists, read_bytes, remove_file
+from apps.spatial.services.compute.surfaces import RESERVE_BYTES, produce_surface
 from apps.spatial.services.safe_paths import UnsafeSpatialPath
 
 CAPABILITY_MINUTES = 15
@@ -136,54 +139,33 @@ def _cleanup(job: ComputeJob, *, published: bool) -> dict:
 
 
 def _store_source(organization, user, payload: bytes) -> GeospatialAsset:
-    asset = GeospatialAsset.objects.create(
+    return store_bytes(
         organization=organization,
-        created_by=user,
+        user=user,
+        payload=payload,
         kind=ASSET_SOURCE,
         media_type="model/gltf+json",
-        byte_size=len(payload),
-        sha256=sha256_hex(payload),
-        storage_key="",
         provenance=PROVENANCE_USER,
+        asset_type="gltf",
+        status="stored",
+        suffix=".gltf",
+        source_note="User-supplied glTF retained for the compute job.",
     )
-    key = f"{organization.id}/{asset.id}.gltf"
-    try:
-        write_bytes(str(organization.id), key, payload)
-    except (OSError, UnsafeSpatialPath):
-        asset.delete()
-        raise
-    asset.storage_key = key
-    asset.save(update_fields=["storage_key"])
-    return asset
 
 
 def _store_derived(job: ComputeJob, payload: bytes) -> GeospatialAsset:
-    digest = sha256_hex(payload)
-    asset = GeospatialAsset.objects.create(
-        organization_id=job.organization_id,
-        created_by_id=job.created_by_id,
+    return store_bytes(
+        organization=job.organization,
+        user=job.created_by,
+        payload=payload,
         kind=ASSET_DERIVED,
         media_type="model/gltf+json",
-        byte_size=len(payload),
-        sha256=digest,
-        storage_key="",
         provenance=PROVENANCE_MODELLED,
+        asset_type="gltf",
+        status="published",
+        suffix=".gltf",
+        source_note="Normalized glTF. Not a reconstruction or a survey.",
     )
-    key = f"{job.organization_id}/{asset.id}.gltf"
-    try:
-        write_bytes(str(job.organization_id), key, payload)
-        readback = read_bytes(str(job.organization_id), key)
-    except (OSError, UnsafeSpatialPath):
-        remove_file(str(job.organization_id), key)
-        asset.delete()
-        raise
-    if sha256_hex(readback) != digest or readback != payload:
-        remove_file(str(job.organization_id), key)
-        asset.delete()
-        raise PermanentComputeError("Derived bytes failed the read-back check.")
-    asset.storage_key = key
-    asset.save(update_fields=["storage_key"])
-    return asset
 
 
 def document_bytes(*, fixture: str, document: dict | None) -> bytes:
@@ -208,10 +190,11 @@ def submit_job(
     document: dict | None = None,
     idempotency_key: str = "",
     simulate: str = "",
+    place: str = "",
 ) -> tuple[ComputeJob, bool]:
     if provider_id not in PROVIDER_IDS:
         raise PermanentComputeError("Unknown compute provider.")
-    if operation != OPERATION_GLTF:
+    if operation != OPERATION_GLTF and operation not in SURFACE_OPERATIONS:
         raise PermanentComputeError(
             "That operation is not available in the local orchestration layer."
         )
@@ -265,6 +248,16 @@ def submit_job(
         )
         _audit(job, decision["reason"])
         return job, True
+
+    if operation in SURFACE_OPERATIONS:
+        return _submit_surface(
+            organization=organization,
+            user=user,
+            provider_id=provider_id,
+            operation=operation,
+            place=place,
+            idempotency_key=key,
+        )
 
     payload = document_bytes(fixture=fixture, document=document)
     snapshot = preflight_dataset(len(payload))
@@ -342,6 +335,208 @@ def _enqueue(job_id: str) -> None:
     run_compute_job.delay(job_id)
 
 
+def _submit_surface(
+    *,
+    organization,
+    user,
+    provider_id: str,
+    operation: str,
+    place: str,
+    idempotency_key: str,
+) -> tuple[ComputeJob, bool]:
+    chosen = (place or "").strip().lower()
+    if chosen not in {"nairobi", "kisumu"}:
+        raise PermanentComputeError("Choose Nairobi or Kisumu for this surface.")
+    prior = (
+        ComputeJob.objects.filter(
+            organization=organization,
+            operation=operation,
+            state=SUCCEEDED,
+            preflight__place=chosen,
+        )
+        .select_related("input_asset", "output_asset")
+        .order_by("-created_at")
+        .first()
+    )
+    if (
+        prior
+        and prior.output_asset_id
+        and prior.output_asset.deleted_at is None
+        and not idempotency_key
+    ):
+        return prior, False
+    if provider_id == LOCAL_GPU:
+        snapshot = preflight_dataset(1)
+        if snapshot["gpu"]["status"] != "available":
+            job = ComputeJob.objects.create(
+                organization=organization,
+                created_by=user,
+                provider_id=LOCAL_GPU,
+                operation=operation,
+                state=FAILED,
+                error_class="ComputeUnavailable",
+                error_detail=snapshot["gpu"]["reason"][:300],
+                source_retained=False,
+                cleanup={
+                    "released": True,
+                    "provider_id": LOCAL_GPU,
+                    "rented_instance": False,
+                    "source_retained": False,
+                    "output_published": False,
+                    "fallback_provider_id": LOCAL_CPU,
+                },
+                estimated_cost_amount=None,
+                actual_cost_amount=ZERO,
+                external_request_count=0,
+                preflight={**snapshot, "place": chosen, "dataset_retained": False},
+                provenance={"remote_worker": False, "reconstruction": False},
+                idempotency_key=idempotency_key,
+                finished_at=timezone.now(),
+            )
+            _audit(job, "Local GPU is unavailable. No rental provider was contacted.")
+            return job, True
+        raise PermanentComputeError("Terrain and building publication runs on the local CPU.")
+    if provider_id != LOCAL_CPU:
+        raise PermanentComputeError("City surfaces run on the local CPU.")
+    snapshot = preflight_dataset(RESERVE_BYTES)
+    assert_room(organization, RESERVE_BYTES)
+    snapshot["place"] = chosen
+    snapshot["estimated_bytes"] = RESERVE_BYTES
+    snapshot["gpu_required"] = False
+    snapshot["rental"] = False
+    job = ComputeJob.objects.create(
+        organization=organization,
+        created_by=user,
+        provider_id=LOCAL_CPU,
+        operation=operation,
+        state=QUEUED,
+        progress=5,
+        input_asset=None,
+        source_retained=False,
+        estimated_cost_amount=None,
+        actual_cost_amount=ZERO,
+        external_request_count=0,
+        preflight=snapshot,
+        provenance={"reconstruction": False, "photogrammetry": False, "place": chosen},
+        idempotency_key=idempotency_key,
+    )
+    _audit(job, "Surface job queued. No rented GPU was requested.")
+    _issue_capability(job)
+    _enqueue(str(job.id))
+    job.refresh_from_db()
+    return job, True
+
+
+def _run_surface(job_id: str) -> str:
+    with transaction.atomic():
+        job = ComputeJob.objects.select_for_update(of=("self",)).get(pk=job_id)
+        if job.state in TERMINAL_STATES:
+            return job.state
+        _authorize_app_worker(job)
+        job.attempt += 1
+        job.state = RUNNING
+        job.progress = 40
+        job.started_at = job.started_at or timezone.now()
+        job.external_request_count = 0
+        job.save()
+        _audit(job, f"Attempt {job.attempt} started.")
+        operation = job.operation
+        place = str((job.preflight or {}).get("place") or "")
+        organization = job.organization
+        user = job.created_by
+    try:
+        produced = produce_surface(operation, place)
+        source = store_bytes(
+            organization=organization,
+            user=user,
+            payload=produced["source_bytes"],
+            kind=ASSET_SOURCE,
+            media_type=produced["source_media"],
+            provenance=produced["source_provenance"],
+            asset_type=produced["source_type"],
+            status="stored",
+            suffix=produced["source_suffix"],
+            license_identifier=produced["license_identifier"],
+            attribution=produced["attribution"],
+            source_note=produced["note"],
+        )
+    except ComputeError as exc:
+        _fail(job_id, exc)
+        return FAILED
+    with transaction.atomic():
+        locked = ComputeJob.objects.select_for_update(of=("self",)).get(pk=job_id)
+        if locked.state in TERMINAL_STATES:
+            return locked.state
+        locked.input_asset = source
+        locked.source_retained = True
+        locked.save(update_fields=["input_asset", "source_retained", "updated_at"])
+    try:
+        output = store_bytes(
+            organization=organization,
+            user=user,
+            payload=produced["output_bytes"],
+            kind=ASSET_DERIVED,
+            media_type=produced["output_media"],
+            provenance=produced["output_provenance"],
+            asset_type=produced["output_type"],
+            status="published",
+            suffix=produced["output_suffix"],
+            license_identifier=produced["license_identifier"],
+            attribution=produced["attribution"],
+            source_note=produced["note"],
+        )
+    except ComputeError as exc:
+        _fail(job_id, exc)
+        return FAILED
+    _finish_surface(job_id, output, produced["provenance"])
+    return SUCCEEDED
+
+
+def _finish_surface(job_id: str, output: GeospatialAsset, extra: dict) -> None:
+    with transaction.atomic():
+        job = (
+            ComputeJob.objects.select_for_update(of=("self",))
+            .select_related("input_asset", "output_asset")
+            .get(pk=job_id)
+        )
+        if job.state in TERMINAL_STATES:
+            return
+        job.state = VERIFYING
+        job.progress = 80
+        job.save(update_fields=["state", "progress", "updated_at"])
+        _audit(job, "Verifying the derived asset hash before publication.")
+        readback = read_bytes(str(job.organization_id), output.storage_key)
+        if sha256_hex(readback) != output.sha256:
+            raise PermanentComputeError("Published hash does not match the stored asset.")
+        job.output_asset = output
+        job.state = SUCCEEDED
+        job.progress = 100
+        job.error_class = ""
+        job.error_detail = ""
+        job.estimated_cost_amount = None
+        job.actual_cost_amount = ZERO
+        job.external_request_count = 0
+        job.source_retained = True
+        job.finished_at = timezone.now()
+        job.provenance = {
+            "operation": job.operation,
+            "provider_id": job.provider_id,
+            "source_sha256": job.input_asset.sha256 if job.input_asset_id else "",
+            "output_sha256": output.sha256,
+            "remote_worker": False,
+            "processing_gpu_required_to_view": False,
+            "transport": "in-process",
+            "production_credentials_sent": False,
+            "output_provenance": PROVENANCE_MODELLED,
+            "source_provenance": job.input_asset.provenance if job.input_asset_id else "",
+            **extra,
+        }
+        _burn_capability(job)
+        job.cleanup = _cleanup(job, published=True)
+        job.save()
+        _audit(job, "Derived surface published after hash verification.")
+
+
 def execute_job(job_id: str) -> str:
     try:
         job = ComputeJob.objects.select_related("input_asset", "output_asset").get(pk=job_id)
@@ -350,6 +545,8 @@ def execute_job(job_id: str) -> str:
     if job.state in TERMINAL_STATES:
         return job.state
     try:
+        if job.operation in SURFACE_OPERATIONS:
+            return _run_surface(job_id)
         return _run_attempts(job_id)
     except ComputeError as exc:
         _fail(job_id, exc)
@@ -596,6 +793,8 @@ def job_payload(job: ComputeJob) -> dict:
         "provenance": job.provenance,
         "input_sha256": job.input_asset.sha256 if job.input_asset_id else None,
         "output_sha256": job.output_asset.sha256 if job.output_asset_id else None,
+        "output_asset_type": job.output_asset.asset_type if job.output_asset_id else None,
+        "output_media_type": job.output_asset.media_type if job.output_asset_id else None,
         "output_published": bool(job.output_asset_id and job.state == SUCCEEDED),
         "simulate": job.simulate,
         "created_at": job.created_at.isoformat(),

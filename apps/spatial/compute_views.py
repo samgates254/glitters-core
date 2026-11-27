@@ -12,9 +12,11 @@ from apps.spatial.models import ComputeJob, ComputeJobEvent
 from apps.spatial.services.compute.contracts import (
     COMMERCIAL_PROVIDERS,
     LOCAL_CPU,
+    AssetInUse,
     ComputeError,
     DatasetTooLarge,
     JobAlreadyTerminal,
+    QuotaExceeded,
     RemoteRenderDisabled,
 )
 from apps.spatial.services.compute.providers import (
@@ -36,9 +38,13 @@ from apps.spatial.throttles import SpatialComputeRateThrottle
 
 
 def _public_error(exc: ComputeError) -> exceptions.APIException:
-    if isinstance(exc, DatasetTooLarge):
+    if isinstance(exc, (DatasetTooLarge, QuotaExceeded)):
         api_error = exceptions.ValidationError({"detail": str(exc)})
         return api_error
+    if isinstance(exc, AssetInUse):
+        conflict = exceptions.ValidationError({"detail": str(exc)})
+        conflict.status_code = status.HTTP_409_CONFLICT
+        return conflict
     if isinstance(exc, JobAlreadyTerminal):
         conflict = exceptions.ValidationError({"detail": str(exc)})
         conflict.status_code = status.HTTP_409_CONFLICT
@@ -91,6 +97,7 @@ class ComputeJobViewSet(viewsets.GenericViewSet):
                 document=document if isinstance(document, dict) else None,
                 idempotency_key=str(body.get("idempotency_key") or ""),
                 simulate=str(body.get("simulate") or ""),
+                place=str(body.get("place") or ""),
             )
         except ComputeError as exc:
             raise _public_error(exc) from exc
@@ -119,7 +126,7 @@ class ComputeJobViewSet(viewsets.GenericViewSet):
         if job.state != "SUCCEEDED" or not job.output_asset_id:
             raise exceptions.NotFound("No validated output is published for this job.")
         asset = job.output_asset
-        if str(asset.organization_id) != str(job.organization_id):
+        if asset.deleted_at is not None or str(asset.organization_id) != str(job.organization_id):
             raise exceptions.NotFound("No validated output is published for this job.")
         try:
             path = resolve_compute_file(str(job.organization_id), asset.storage_key)
@@ -129,7 +136,8 @@ class ComputeJobViewSet(viewsets.GenericViewSet):
         response = FileResponse(handle, content_type=asset.media_type)
         response["X-Content-SHA256"] = asset.sha256
         response["Cache-Control"] = "private, no-store"
-        response["Content-Disposition"] = 'inline; filename="fixture.gltf"'
+        filename = "fixture.gltf" if asset.asset_type == "gltf" else "surface.json"
+        response["Content-Disposition"] = f'inline; filename="{filename}"'
         return response
 
     @action(detail=True, methods=["get"])

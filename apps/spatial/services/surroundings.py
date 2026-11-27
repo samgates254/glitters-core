@@ -97,6 +97,10 @@ def _features(payload: dict) -> tuple[list[dict], dict[str, int], bool]:
             continue
         tags = element.get("tags") if isinstance(element.get("tags"), dict) else {}
         kind = element.get("type")
+        element_id = element.get("id")
+        osm_id = ""
+        if kind in {"node", "way", "relation"} and isinstance(element_id, int):
+            osm_id = f"{kind}/{element_id}"
         if kind == "node" and tags.get("amenity") and len(amenities) < MAX_AMENITIES:
             lon = element.get("lon")
             lat = element.get("lat")
@@ -108,6 +112,7 @@ def _features(payload: dict) -> tuple[list[dict], dict[str, int], bool]:
                             "kind": "amenity",
                             "amenity": str(tags.get("amenity"))[:64],
                             "name": str(tags.get("name") or "")[:120],
+                            "osm_id": osm_id,
                             "source": "OpenStreetMap",
                         },
                         "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]},
@@ -132,8 +137,10 @@ def _features(payload: dict) -> tuple[list[dict], dict[str, int], bool]:
                         "kind": "building",
                         "height_m": height,
                         "height_basis": basis,
+                        "height_measured": False,
                         "height_note": note,
                         "name": str(tags.get("name") or "")[:120],
+                        "osm_id": osm_id,
                         "source": "OpenStreetMap",
                     },
                     "geometry": {"type": "Polygon", "coordinates": [ring]},
@@ -147,6 +154,7 @@ def _features(payload: dict) -> tuple[list[dict], dict[str, int], bool]:
                         "kind": "road",
                         "highway": str(tags.get("highway"))[:64],
                         "name": str(tags.get("name") or "")[:120],
+                        "osm_id": osm_id,
                         "source": "OpenStreetMap",
                     },
                     "geometry": {"type": "LineString", "coordinates": ring},

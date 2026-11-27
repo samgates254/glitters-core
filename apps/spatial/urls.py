@@ -3,6 +3,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
+from apps.spatial.asset_views import GeospatialAssetViewSet
 from apps.spatial.compute_views import (
     ComputeJobViewSet,
     compute_adapters,
@@ -63,6 +64,7 @@ router.register(
 router.register("provider-queries", ProviderQueryRecordViewSet, basename="spatial-provider-query")
 router.register("data-sources", GeospatialDataSourceViewSet, basename="spatial-data-source")
 router.register("compute/jobs", ComputeJobViewSet, basename="spatial-compute-job")
+router.register("assets", GeospatialAssetViewSet, basename="spatial-asset")
 
 urlpatterns = [
     path("health/", spatial_health_check, name="spatial-health"),

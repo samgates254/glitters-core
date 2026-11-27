@@ -43,6 +43,9 @@ QUEUED_STATES = frozenset({PENDING, VALIDATING, QUEUED})
 STATE_CHOICES = [(item, item) for item in JOB_STATES]
 
 OPERATION_GLTF = "gltf_normalize"
+OPERATION_TERRAIN = "publish_terrain_surface"
+OPERATION_BUILDINGS = "publish_building_models"
+SURFACE_OPERATIONS = frozenset({OPERATION_TERRAIN, OPERATION_BUILDINGS})
 FIXTURE_TRIANGLE = "triangle-v1"
 SIMULATE_FAIL_ONCE = "fail_once"
 SIMULATE_FAIL = "fail"
@@ -51,6 +54,7 @@ ASSET_SOURCE = "source"
 ASSET_DERIVED = "derived"
 PROVENANCE_USER = "USER-SUPPLIED"
 PROVENANCE_MODELLED = "MODELLED"
+PROVENANCE_DOWNLOADED = "DOWNLOADED"
 
 ESTIMATE_NOTE = "No contracted rate card. This is not a quote."
 ACTUAL_NOTE = "No rented GPU was used. Recorded actual cost is 0. This is not an invoice."
@@ -81,6 +85,14 @@ class PermanentComputeError(ComputeError):
 
 class DatasetTooLarge(PermanentComputeError):
     pass
+
+
+class QuotaExceeded(PermanentComputeError):
+    """The organization storage quota or per-file cap refused the write."""
+
+
+class AssetInUse(PermanentComputeError):
+    """A compute job still references this asset."""
 
 
 class ProviderNotConfigured(PermanentComputeError):
