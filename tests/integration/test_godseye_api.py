@@ -312,3 +312,45 @@ def test_provider_registry_checks_without_calling_restricted_sources(members, mo
     assert ProviderQueryRecord.objects.filter(organization=members["org_b"]).count() == 0
     stored = audit.json()["results"]
     assert all("visual.tif" not in str(row) for row in stored)
+
+
+@pytest.mark.django_db
+def test_kenya_boundary_download_stays_on_the_provider_host(members, monkeypatch):
+    calls = []
+
+    def fake_fetch(url, **kwargs):
+        calls.append(url)
+        if url.endswith("/KEN/ADM1/"):
+            return 200, (
+                b'[{"boundaryName":"Kenya","boundaryISO":"KEN","boundaryType":"ADM1",'
+                b'"boundaryYear":2020,"boundaryLicense":"Public Domain",'
+                b'"boundarySource":"RCMRD","simplifiedGeometryGeoJSON":'
+                b'"https://www.geoboundaries.org/data/kenya-adm1.geojson"}]'
+            )
+        assert url == "https://www.geoboundaries.org/data/kenya-adm1.geojson"
+        return 200, (
+            b'{"type":"FeatureCollection","features":[{"type":"Feature","properties":'
+            b'{"shapeName":"Nairobi","shapeISO":"KE-30"},"geometry":{"type":"Polygon",'
+            b'"coordinates":[[[36.7,-1.4],[37.0,-1.4],[37.0,-1.1],[36.7,-1.1],[36.7,-1.4]]]}}]}'
+        )
+
+    monkeypatch.setattr("apps.spatial.services.providers.boundaries.fetch_https", fake_fetch)
+    owner = _client(members["owner"])
+    refused = owner.get("/api/v1/spatial/data-sources/earth-search/boundary/")
+    assert refused.status_code == 400
+    assert calls == []
+
+    loaded = owner.get("/api/v1/spatial/data-sources/geoboundaries-ken-adm1/boundary/")
+    assert loaded.status_code == 200
+    body = loaded.json()
+    assert body["geometry_downloaded"] is True
+    assert body["stored_in_database"] is False
+    assert body["feature_count"] == 1
+    assert body["geojson"]["features"][0]["properties"]["shapeName"] == "Nairobi"
+    assert "not a survey" in body["limitation"]
+    assert calls[1] == "https://www.geoboundaries.org/data/kenya-adm1.geojson"
+
+    other = _client(members["other"])
+    hidden = other.get("/api/v1/spatial/provider-queries/")
+    assert hidden.json()["count"] == 0
+    assert owner.get("/api/v1/spatial/provider-queries/").json()["count"] == 1

@@ -20,9 +20,10 @@ from apps.spatial.models import (
     LandIntelligenceProfile,
     ProviderQueryRecord,
 )
+from apps.spatial.services.providers.boundaries import load_published_boundary
 from apps.spatial.services.providers.health import run_provider_check
 from apps.spatial.services.providers.http import ProviderTransportError
-from apps.spatial.services.providers.registry import sync_provider_catalog
+from apps.spatial.services.providers.registry import record_query, sync_provider_catalog
 from apps.spatial.services.providers.search import search_provider_catalog
 from apps.spatial.services.request_scope import (
     bind_member_organization,
@@ -111,7 +112,7 @@ class GeospatialDataSourceViewSet(viewsets.ReadOnlyModelViewSet):
         return super().get_queryset()
 
     def get_throttles(self):
-        if self.action in {"check", "catalog_search"}:
+        if self.action in {"check", "catalog_search", "boundary"}:
             return [SpatialComputeRateThrottle()]
         return super().get_throttles()
 
@@ -145,6 +146,41 @@ class GeospatialDataSourceViewSet(viewsets.ReadOnlyModelViewSet):
         except LookupError:
             raise exceptions.NotFound("That data source is not registered.") from None
         return Response(payload, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="boundary")
+    def boundary(self, request, provider_id=None):
+        """Simplified public geometry from the provider host. It is not stored."""
+
+        organization = _one_organization(request)
+        get_object_or_404(self.get_queryset(), provider_id=provider_id)
+        try:
+            payload = load_published_boundary(provider_id)
+        except ProviderTransportError as exc:
+            record_query(
+                provider=get_object_or_404(GeospatialDataSource, provider_id=provider_id),
+                organization=organization,
+                user=request.user,
+                query_kind="boundary",
+                http_status=exc.http_status,
+                operational_state="unreachable",
+                error=exc.message,
+            )
+            return Response(
+                {"errors": {"detail": exc.message}},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except LookupError:
+            raise exceptions.NotFound("That data source is not registered.") from None
+        record_query(
+            provider=get_object_or_404(GeospatialDataSource, provider_id=provider_id),
+            organization=organization,
+            user=request.user,
+            query_kind="boundary",
+            http_status=200,
+            operational_state="reachable",
+            item_count=int(payload["feature_count"]),
+        )
+        return Response(payload)
 
 
 class ProviderQueryRecordViewSet(viewsets.ReadOnlyModelViewSet):
