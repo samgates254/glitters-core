@@ -31,6 +31,8 @@ from apps.spatial.services.request_scope import (
     scope_member_orgs,
 )
 from apps.spatial.services.scenes import reference_places
+from apps.spatial.services.surroundings import load_surroundings
+from apps.spatial.services.terrain import screen_extent
 from apps.spatial.throttles import SpatialComputeRateThrottle
 
 
@@ -96,6 +98,50 @@ class LandIntelligenceProfileViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         _require_membership(self.request)
         bind_member_organization(self.request, serializer)
+
+    def get_throttles(self):
+        if self.action in {"terrain", "surroundings"}:
+            return [SpatialComputeRateThrottle()]
+        return super().get_throttles()
+
+    def _screen_geometry(self, request):
+        profile = self.get_object()
+        west, south, east, north = profile.geometry.extent
+        return profile, (west, south, east, north)
+
+    @action(detail=True, methods=["get"], url_path="terrain")
+    def terrain(self, request, pk=None):
+        """Read a Copernicus DEM window for this outline. The grid is not stored."""
+
+        _one_organization(request)
+        profile, extent = self._screen_geometry(request)
+        try:
+            payload = screen_extent(
+                extent,
+                latitude=float(profile.centroid_latitude),
+                longitude=float(profile.centroid_longitude),
+            )
+        except ProviderTransportError as exc:
+            return Response(
+                {"errors": {"detail": exc.message}},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(payload)
+
+    @action(detail=True, methods=["get"], url_path="surroundings")
+    def surroundings(self, request, pk=None):
+        """One bounded OpenStreetMap query. Features are not stored as parcels."""
+
+        _one_organization(request)
+        _profile, extent = self._screen_geometry(request)
+        try:
+            payload = load_surroundings(extent)
+        except ProviderTransportError as exc:
+            return Response(
+                {"errors": {"detail": exc.message}},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(payload)
 
 
 class GeospatialDataSourceViewSet(viewsets.ReadOnlyModelViewSet):
