@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.gis.db import models
@@ -58,6 +59,7 @@ from apps.spatial.domain import (
     build_canonical_urn,
     validate_canonical_urn,
 )
+from apps.spatial.services.compute.contracts import PROVIDER_CHOICES, STATE_CHOICES
 from apps.spatial.services.crs import calculate_planar_area_utm_sqm
 from apps.spatial.services.validation import (
     check_acyclic_lineage,
@@ -1561,3 +1563,187 @@ class ProviderQueryRecord(models.Model):
     @property
     def provider_id_label(self) -> str:
         return self.provider.provider_id
+
+
+class GeospatialAsset(models.Model):
+    """One organization file. The storage key is relative and is not an API field."""
+
+    KIND_CHOICES = [("source", "Source"), ("derived", "Derived")]
+    PROVENANCE_CHOICES = [("USER-SUPPLIED", "User supplied"), ("MODELLED", "Modelled")]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.PROTECT, related_name="geospatial_assets"
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="geospatial_assets",
+    )
+    kind = models.CharField(max_length=16, choices=KIND_CHOICES)
+    media_type = models.CharField(max_length=128)
+    byte_size = models.PositiveIntegerField()
+    sha256 = models.CharField(max_length=64)
+    storage_key = models.CharField(max_length=300, blank=True, default="")
+    provenance = models.CharField(max_length=32, choices=PROVENANCE_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "spatial_geospatial_asset"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["organization", "-created_at"], name="spatial_asset_org_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(kind__in=["source", "derived"]),
+                name="spatial_asset_kind_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(provenance__in=["USER-SUPPLIED", "MODELLED"]),
+                name="spatial_asset_prov_valid",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.kind} {self.sha256[:12]}"
+
+
+class ComputeEntitlement(models.Model):
+    """An owner decision. A row here does not enable a billable GPU request."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name="compute_entitlements"
+    )
+    provider_id = models.CharField(max_length=32, choices=PROVIDER_CHOICES)
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="compute_entitlements_granted",
+    )
+    note = models.CharField(max_length=300, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "spatial_compute_entitlement"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "provider_id"],
+                name="spatial_compute_entitlement_uq",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(provider_id__in=[item for item, _label in PROVIDER_CHOICES]),
+                name="spatial_compute_ent_provider",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.provider_id} entitlement"
+
+
+class ComputeJob(models.Model):
+    """One isolated processing job. The row is the durable record, not the broker."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.PROTECT, related_name="compute_jobs"
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="compute_jobs",
+    )
+    provider_id = models.CharField(max_length=32, choices=PROVIDER_CHOICES)
+    operation = models.CharField(max_length=64)
+    state = models.CharField(max_length=16, choices=STATE_CHOICES, default="PENDING")
+    progress = models.PositiveSmallIntegerField(default=0)
+    attempt = models.PositiveSmallIntegerField(default=0)
+    max_attempts = models.PositiveSmallIntegerField(default=1)
+    error_class = models.CharField(max_length=64, blank=True, default="")
+    error_detail = models.CharField(max_length=300, blank=True, default="")
+    input_asset = models.ForeignKey(
+        GeospatialAsset,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="compute_jobs_as_input",
+    )
+    output_asset = models.ForeignKey(
+        GeospatialAsset,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="compute_jobs_as_output",
+    )
+    source_retained = models.BooleanField(default=True)
+    cleanup = models.JSONField(default=dict, blank=True)
+    estimated_cost_amount = models.DecimalField(
+        max_digits=12, decimal_places=4, null=True, blank=True
+    )
+    actual_cost_amount = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("0"))
+    external_request_count = models.PositiveIntegerField(default=0)
+    preflight = models.JSONField(default=dict, blank=True)
+    provenance = models.JSONField(default=dict, blank=True)
+    idempotency_key = models.CharField(max_length=80, blank=True, default="")
+    simulate = models.CharField(max_length=16, blank=True, default="")
+    capability_hash = models.CharField(max_length=64, blank=True, default="")
+    capability_expires_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "spatial_compute_job"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["organization", "-created_at"], name="spatial_compute_job_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(state__in=[item for item, _label in STATE_CHOICES]),
+                name="spatial_compute_state_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(provider_id__in=[item for item, _label in PROVIDER_CHOICES]),
+                name="spatial_compute_provider_ok",
+            ),
+            models.UniqueConstraint(
+                fields=["organization", "idempotency_key"],
+                condition=~models.Q(idempotency_key=""),
+                name="spatial_compute_idem_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.operation} {self.state}"
+
+
+class ComputeJobEvent(models.Model):
+    """Append-only job audit. Messages must not contain credentials or file paths."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    job = models.ForeignKey(ComputeJob, on_delete=models.CASCADE, related_name="events")
+    organization = models.ForeignKey(
+        Organization, on_delete=models.PROTECT, related_name="compute_job_events"
+    )
+    state = models.CharField(max_length=16)
+    message = models.CharField(max_length=300)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "spatial_compute_job_event"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["job", "created_at"], name="spatial_compute_evt_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.state} {self.message[:40]}"

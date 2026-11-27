@@ -179,6 +179,12 @@ CELERY_BEAT_SCHEDULE: dict[str, object] = {
         "schedule": 15 * 60,
     },
 }
+# A present API key is not approval. Rental and remote rendering stay off.
+GLITTERS_GPU_RENTAL_ENABLED = env.bool("GLITTERS_GPU_RENTAL_ENABLED", default=False)
+GLITTERS_REMOTE_RENDER_ENABLED = env.bool("GLITTERS_REMOTE_RENDER_ENABLED", default=False)
+GLITTERS_COMPUTE_EAGER = env.bool("GLITTERS_COMPUTE_EAGER", default=True)
+GLITTERS_COMPUTE_MAX_BYTES = env.int("GLITTERS_COMPUTE_MAX_BYTES", default=2_000_000)
+GLITTERS_COMPUTE_ROOT = env("GLITTERS_COMPUTE_ROOT", default="")
 
 CACHES = {
     "default": {
