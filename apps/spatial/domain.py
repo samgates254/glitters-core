@@ -809,3 +809,131 @@ class ForecastingStatus:
         (EXCEEDS_PREDICTIVE_HORIZON, "Requested Forecast Horizon Exceeds Valid Predictive Envelope"),
     )
     ALL = {c[0] for c in CHOICES}
+
+
+class SceneMode:
+    GLOBE_3D = "3d"
+    MAP_2D = "2d"
+    COLUMBUS = "columbus"
+
+    CHOICES = (
+        (GLOBE_3D, "3D globe"),
+        (MAP_2D, "2D map"),
+        (COLUMBUS, "Columbus view"),
+    )
+    ALL = {c[0] for c in CHOICES}
+
+
+class ScenePlace:
+    NAIROBI = "nairobi"
+    KISUMU = "kisumu"
+    CUSTOM = "custom"
+
+    CHOICES = (
+        (NAIROBI, "Nairobi camera reference"),
+        (KISUMU, "Kisumu camera reference"),
+        (CUSTOM, "Custom camera"),
+    )
+    ALL = {c[0] for c in CHOICES}
+
+
+class BoundaryClass:
+    """Accepted outlines only. Verified title and survey classes are refused."""
+
+    USER_DRAWN = "user_drawn"
+    IMPORTED_THIRD_PARTY = "imported_third_party"
+
+    CHOICES = (
+        (USER_DRAWN, "User-drawn area"),
+        (IMPORTED_THIRD_PARTY, "Imported third-party outline"),
+    )
+    ALL = {c[0] for c in CHOICES}
+
+
+class ProvenanceClass:
+    OBSERVED = "OBSERVED"
+    MODELLED = "MODELLED"
+    ESTIMATED = "ESTIMATED"
+    USER_SUPPLIED = "USER-SUPPLIED"
+    PROFESSIONALLY_VERIFIED = "PROFESSIONALLY VERIFIED"
+    HISTORICAL = "HISTORICAL"
+    SIMULATED = "SIMULATED"
+
+    CHOICES = (
+        (OBSERVED, "Observed"),
+        (MODELLED, "Modelled"),
+        (ESTIMATED, "Estimated"),
+        (USER_SUPPLIED, "User-supplied"),
+        (PROFESSIONALLY_VERIFIED, "Professionally verified"),
+        (HISTORICAL, "Historical"),
+        (SIMULATED, "Simulated"),
+    )
+    ALL = {c[0] for c in CHOICES}
+
+
+class ProviderServiceStatus:
+    OPEN_AND_USABLE = "OPEN AND USABLE"
+    OPEN_WITH_CONDITIONS = "OPEN WITH CONDITIONS"
+    FREE_TIER_RESTRICTED = "FREE-TIER RESTRICTED"
+    AUTHENTICATED = "AUTHENTICATED"
+    COMMERCIAL = "COMMERCIAL"
+    UNAVAILABLE = "UNAVAILABLE"
+    NOT_YET_VERIFIED = "NOT YET VERIFIED"
+
+    CHOICES = (
+        (OPEN_AND_USABLE, "Open and usable"),
+        (OPEN_WITH_CONDITIONS, "Open with conditions"),
+        (FREE_TIER_RESTRICTED, "Free-tier restricted"),
+        (AUTHENTICATED, "Authenticated"),
+        (COMMERCIAL, "Commercial"),
+        (UNAVAILABLE, "Unavailable"),
+        (NOT_YET_VERIFIED, "Not yet verified"),
+    )
+    ALL = {c[0] for c in CHOICES}
+
+
+class ProviderOperationalState:
+    NOT_CHECKED = "not_checked"
+    REACHABLE = "reachable"
+    UNREACHABLE = "unreachable"
+    NOT_CONTACTED = "not_contacted"
+    CREDENTIALS_REQUIRED = "credentials_required"
+
+    CHOICES = (
+        (NOT_CHECKED, "Not checked"),
+        (REACHABLE, "Reachable"),
+        (UNREACHABLE, "Unreachable"),
+        (NOT_CONTACTED, "Not contacted"),
+        (CREDENTIALS_REQUIRED, "Credentials required"),
+    )
+    ALL = {c[0] for c in CHOICES}
+
+
+class CommercialUse:
+    ELIGIBLE = "eligible"
+    CONDITIONS = "conditions"
+    NOT_ELIGIBLE = "not_eligible"
+    UNKNOWN = "unknown"
+
+    CHOICES = (
+        (ELIGIBLE, "Eligible"),
+        (CONDITIONS, "Conditions apply"),
+        (NOT_ELIGIBLE, "Not eligible"),
+        (UNKNOWN, "Unknown"),
+    )
+    ALL = {c[0] for c in CHOICES}
+
+
+MAX_LAND_AREA_SQM = 20_000_000
+MIN_LAND_AREA_SQM = 10
+MAX_LAND_VERTICES = 400
+MAX_SCENE_BOOKMARKS = 12
+MAX_SCENE_LAYERS = 24
+MAX_CATALOG_SEARCH_LIMIT = 10
+MAX_CATALOG_BBOX_DEGREES = 2.0
+SURVEY_DISCLAIMER = (
+    "Area and perimeter use one centroid UTM zone. "
+    "This is a screening measurement, not a cadastral survey or an engineering elevation."
+)
+PLANNING_STATUS_UNVERIFIED = "PLANNING STATUS NOT VERIFIED"
+NOT_A_REGISTERED_PARCEL = "NOT_A_REGISTERED_PARCEL"

@@ -12,12 +12,14 @@ from apps.organizations.models import Organization
 from apps.spatial.domain import (
     SRID_WGS84,
     BeaconType,
+    BoundaryClass,
     BuildingAssociationType,
     BuildingClassification,
     ChangeCandidateStatus,
     ChangeCategory,
     ChangeProjectStatus,
     ChangeRunStatus,
+    CommercialUse,
     ConstructionPhase,
     DatasetCategory,
     DatasetFormat,
@@ -37,6 +39,9 @@ from apps.spatial.domain import (
     LineageType,
     PropertyBuildingAssocType,
     PropertyParcelAssocType,
+    ProvenanceClass,
+    ProviderOperationalState,
+    ProviderServiceStatus,
     RasterAssetType,
     RasterJobStatus,
     RasterOperation,
@@ -44,6 +49,8 @@ from apps.spatial.domain import (
     ReviewDecision,
     RoadClass,
     RoadSurface,
+    SceneMode,
+    ScenePlace,
     SpatialAnalysisRunStatus,
     SpatialAnalysisType,
     UpdateFrequency,
@@ -1329,3 +1336,228 @@ class SpatialScenario(models.Model):
 
     def __str__(self) -> str:
         return f"Scenario {self.name} ({self.project.name})"
+
+
+class GeospatialScene(models.Model):
+    """Saved God's Eye camera. A scene is not a parcel and does not certify elevation."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.PROTECT, related_name="geospatial_scenes"
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="geospatial_scenes",
+    )
+    name = models.CharField(max_length=120)
+    place_key = models.CharField(max_length=16, choices=ScenePlace.CHOICES)
+    scene_mode = models.CharField(
+        max_length=16, choices=SceneMode.CHOICES, default=SceneMode.GLOBE_3D
+    )
+    camera_longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    camera_latitude = models.DecimalField(max_digits=8, decimal_places=6)
+    camera_height_m = models.DecimalField(max_digits=10, decimal_places=2)
+    heading_deg = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    pitch_deg = models.DecimalField(max_digits=5, decimal_places=2, default=-35)
+    roll_deg = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    terrain_exaggeration = models.DecimalField(max_digits=3, decimal_places=1, default=1)
+    layer_state = models.JSONField(default=list, blank=True)
+    bookmarks = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "spatial_geospatial_scene"
+        ordering = ["-updated_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(place_key__in=sorted(ScenePlace.ALL)),
+                name="spatial_scene_place_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(scene_mode__in=sorted(SceneMode.ALL)),
+                name="spatial_scene_mode_valid",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "-updated_at"], name="spatial_scene_org_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.place_key})"
+
+
+class LandIntelligenceProfile(models.Model):
+    """Measured user or imported outline. Never a verified land-registry parcel."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.PROTECT, related_name="land_intelligence_profiles"
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="land_intelligence_profiles",
+    )
+    name = models.CharField(max_length=120)
+    boundary_class = models.CharField(max_length=32, choices=BoundaryClass.CHOICES)
+    geometry = models.PolygonField(srid=SRID_WGS84, spatial_index=True)
+    vertex_count = models.PositiveIntegerField()
+    area_sqm = models.DecimalField(max_digits=14, decimal_places=2)
+    perimeter_m = models.DecimalField(max_digits=14, decimal_places=2)
+    centroid_longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    centroid_latitude = models.DecimalField(max_digits=8, decimal_places=6)
+    bbox_min_longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    bbox_min_latitude = models.DecimalField(max_digits=8, decimal_places=6)
+    bbox_max_longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    bbox_max_latitude = models.DecimalField(max_digits=8, decimal_places=6)
+    metric_epsg = models.PositiveIntegerField()
+    utm_zone = models.CharField(max_length=8)
+    geometry_evidence = models.CharField(max_length=32, default=ProvenanceClass.USER_SUPPLIED)
+    measurement_evidence = models.CharField(max_length=32, default=ProvenanceClass.MODELLED)
+    measurement_note = models.TextField()
+    source_note = models.CharField(max_length=500, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "spatial_land_intelligence_profile"
+        ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(boundary_class__in=sorted(BoundaryClass.ALL)),
+                name="spatial_land_boundary_class_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(geometry_evidence=ProvenanceClass.USER_SUPPLIED),
+                name="spatial_land_geometry_user_supplied",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(measurement_evidence=ProvenanceClass.MODELLED),
+                name="spatial_land_measurement_modelled",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(area_sqm__gt=0) & models.Q(perimeter_m__gt=0),
+                name="spatial_land_metrics_positive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "-created_at"], name="spatial_land_org_idx"),
+        ]
+
+    @property
+    def legal_status(self) -> str:
+        return "NOT_A_REGISTERED_PARCEL"
+
+    @property
+    def planning_status(self) -> str:
+        return "PLANNING STATUS NOT VERIFIED"
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.boundary_class})"
+
+
+class GeospatialDataSource(models.Model):
+    """Provider control record. A successful ping does not make a source commercially free."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    provider_id = models.SlugField(max_length=64, unique=True)
+    official_name = models.CharField(max_length=160)
+    dataset_name = models.CharField(max_length=200)
+    license_identifier = models.CharField(max_length=200)
+    commercial_use = models.CharField(max_length=32, choices=CommercialUse.CHOICES)
+    attribution = models.TextField()
+    authentication_type = models.CharField(max_length=64)
+    cost_classification = models.CharField(max_length=200)
+    rate_limit_note = models.TextField()
+    monthly_allowance_note = models.TextField()
+    geographic_coverage = models.CharField(max_length=200)
+    temporal_coverage = models.CharField(max_length=200)
+    resolution_note = models.TextField()
+    freshness_note = models.TextField()
+    service_status = models.CharField(max_length=32, choices=ProviderServiceStatus.CHOICES)
+    processing_note = models.TextField()
+    caching_policy = models.TextField()
+    catalog_url = models.URLField(max_length=400, blank=True, default="")
+    check_mode = models.CharField(max_length=32, default="none")
+    stac_search = models.BooleanField(default=False)
+    credential_required = models.BooleanField(default=False)
+    allowed_host = models.CharField(max_length=200, blank=True, default="")
+    operational_state = models.CharField(
+        max_length=32,
+        choices=ProviderOperationalState.CHOICES,
+        default=ProviderOperationalState.NOT_CHECKED,
+    )
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    last_http_status = models.PositiveIntegerField(null=True, blank=True)
+    last_error = models.CharField(max_length=300, blank=True, default="")
+    discovered_summary = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "spatial_geospatial_data_source"
+        ordering = ["official_name"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(service_status__in=sorted(ProviderServiceStatus.ALL)),
+                name="spatial_datasource_status_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(commercial_use__in=sorted(CommercialUse.ALL)),
+                name="spatial_datasource_commercial_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(operational_state__in=sorted(ProviderOperationalState.ALL)),
+                name="spatial_datasource_ops_valid",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.official_name} ({self.service_status})"
+
+
+class ProviderQueryRecord(models.Model):
+    """Audit of a member's provider call. The upstream payload is not stored."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.PROTECT, related_name="provider_query_records"
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="provider_query_records",
+    )
+    provider = models.ForeignKey(
+        GeospatialDataSource, on_delete=models.PROTECT, related_name="query_records"
+    )
+    query_kind = models.CharField(max_length=32)
+    http_status = models.PositiveIntegerField(null=True, blank=True)
+    operational_state = models.CharField(max_length=32, blank=True, default="")
+    item_count = models.PositiveIntegerField(default=0)
+    collection_id = models.CharField(max_length=120, blank=True, default="")
+    bbox = models.JSONField(null=True, blank=True)
+    error = models.CharField(max_length=300, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "spatial_provider_query_record"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["organization", "-created_at"], name="spatial_provider_query_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.query_kind} {self.provider_id_label}"
+
+    @property
+    def provider_id_label(self) -> str:
+        return self.provider.provider_id

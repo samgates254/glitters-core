@@ -3,6 +3,12 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
+from apps.spatial.godseye_views import (
+    GeospatialDataSourceViewSet,
+    GeospatialSceneViewSet,
+    LandIntelligenceProfileViewSet,
+    ProviderQueryRecordViewSet,
+)
 from apps.spatial.views import (
     BuildingViewSet,
     ChangeCandidateViewSet,
@@ -42,6 +48,14 @@ router.register("spatial-analysis/projects", SpatialAnalysisProjectViewSet, base
 router.register("spatial-analysis/runs", SpatialAnalysisRunViewSet, basename="spatial-analysis-run")
 router.register("spatial-analysis/results", SpatialAnalysisResultViewSet, basename="spatial-analysis-result")
 router.register("spatial-analysis/scenarios", SpatialScenarioViewSet, basename="spatial-analysis-scenario")
+router.register("scenes", GeospatialSceneViewSet, basename="spatial-scene")
+router.register(
+    "land-intelligence/profiles",
+    LandIntelligenceProfileViewSet,
+    basename="spatial-land-profile",
+)
+router.register("provider-queries", ProviderQueryRecordViewSet, basename="spatial-provider-query")
+router.register("data-sources", GeospatialDataSourceViewSet, basename="spatial-data-source")
 
 urlpatterns = [
     path("health/", spatial_health_check, name="spatial-health"),
