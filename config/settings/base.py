@@ -67,6 +67,8 @@ INSTALLED_APPS = [
     "apps.operations.apps.OperationsConfig",
     "apps.tenancy.apps.TenancyConfig",
     "apps.spatial.apps.SpatialConfig",
+    "apps.construction.apps.ConstructionConfig",
+    "apps.backoffice.apps.BackofficeConfig",
 ]
 if GDAL_AVAILABLE:
     INSTALLED_APPS.insert(6, "django.contrib.gis")
