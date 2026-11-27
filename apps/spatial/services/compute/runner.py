@@ -15,7 +15,7 @@ from django.db.models import Count, Sum
 from django.utils import timezone
 
 from apps.spatial.models import ComputeEntitlement, ComputeJob, ComputeJobEvent, GeospatialAsset
-from apps.spatial.services.asset_registry import assert_room, store_bytes
+from apps.spatial.services.asset_registry import assert_room, store_bundle, store_bytes
 from apps.spatial.services.compute.contracts import (
     ACTUAL_NOTE,
     ASSET_DERIVED,
@@ -40,6 +40,7 @@ from apps.spatial.services.compute.contracts import (
     SIMULATE_FAIL_ONCE,
     SUCCEEDED,
     SURFACE_OPERATIONS,
+    SURFACE_PRODUCT_REVISIONS,
     TERMINAL_STATES,
     VERIFYING,
     ComputeError,
@@ -358,11 +359,14 @@ def _submit_surface(
         .order_by("-created_at")
         .first()
     )
+    expected_revision = SURFACE_PRODUCT_REVISIONS.get(operation)
+    prior_revision = (prior.preflight or {}).get("product_revision") if prior else None
     if (
         prior
         and prior.output_asset_id
         and prior.output_asset.deleted_at is None
         and not idempotency_key
+        and prior_revision == expected_revision
     ):
         return prior, False
     if provider_id == LOCAL_GPU:
@@ -401,6 +405,8 @@ def _submit_surface(
     snapshot = preflight_dataset(RESERVE_BYTES)
     assert_room(organization, RESERVE_BYTES)
     snapshot["place"] = chosen
+    if expected_revision:
+        snapshot["product_revision"] = expected_revision
     snapshot["estimated_bytes"] = RESERVE_BYTES
     snapshot["gpu_required"] = False
     snapshot["rental"] = False
@@ -471,20 +477,35 @@ def _run_surface(job_id: str) -> str:
         locked.source_retained = True
         locked.save(update_fields=["input_asset", "source_retained", "updated_at"])
     try:
-        output = store_bytes(
-            organization=organization,
-            user=user,
-            payload=produced["output_bytes"],
-            kind=ASSET_DERIVED,
-            media_type=produced["output_media"],
-            provenance=produced["output_provenance"],
-            asset_type=produced["output_type"],
-            status="published",
-            suffix=produced["output_suffix"],
-            license_identifier=produced["license_identifier"],
-            attribution=produced["attribution"],
-            source_note=produced["note"],
-        )
+        if produced.get("output_files"):
+            output = store_bundle(
+                organization=organization,
+                user=user,
+                files=produced["output_files"],
+                kind=ASSET_DERIVED,
+                media_type=produced["output_media"],
+                provenance=produced["output_provenance"],
+                asset_type=produced["output_type"],
+                status="published",
+                license_identifier=produced["license_identifier"],
+                attribution=produced["attribution"],
+                source_note=produced["note"],
+            )
+        else:
+            output = store_bytes(
+                organization=organization,
+                user=user,
+                payload=produced["output_bytes"],
+                kind=ASSET_DERIVED,
+                media_type=produced["output_media"],
+                provenance=produced["output_provenance"],
+                asset_type=produced["output_type"],
+                status="published",
+                suffix=produced["output_suffix"],
+                license_identifier=produced["license_identifier"],
+                attribution=produced["attribution"],
+                source_note=produced["note"],
+            )
     except ComputeError as exc:
         _fail(job_id, exc)
         return FAILED
@@ -793,6 +814,7 @@ def job_payload(job: ComputeJob) -> dict:
         "provenance": job.provenance,
         "input_sha256": job.input_asset.sha256 if job.input_asset_id else None,
         "output_sha256": job.output_asset.sha256 if job.output_asset_id else None,
+        "output_asset_id": str(job.output_asset_id) if job.output_asset_id else None,
         "output_asset_type": job.output_asset.asset_type if job.output_asset_id else None,
         "output_media_type": job.output_asset.media_type if job.output_asset_id else None,
         "output_published": bool(job.output_asset_id and job.state == SUCCEEDED),

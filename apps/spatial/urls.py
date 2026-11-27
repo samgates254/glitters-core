@@ -3,7 +3,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from apps.spatial.asset_views import GeospatialAssetViewSet
+from apps.spatial.asset_views import GeospatialAssetViewSet, asset_file
 from apps.spatial.compute_views import (
     ComputeJobViewSet,
     compute_adapters,
@@ -110,6 +110,11 @@ urlpatterns = [
         "buildings/<str:urn>/digital-twin/",
         BuildingViewSet.as_view({"get": "digital_twin_by_urn"}),
         name="spatial-building-digital-twin-urn",
+    ),
+    path(
+        "assets/<uuid:asset_id>/files/<path:relative>",
+        asset_file,
+        name="spatial-asset-file",
     ),
     path("", include(router.urls)),
 ]

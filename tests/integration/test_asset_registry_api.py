@@ -7,11 +7,13 @@ from django.contrib.gis.geos import Polygon
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from rest_framework.test import APIClient
+from tests.unit.test_asset_validation import tiny_geographic_cog
 
 from apps.identity.models import User
 from apps.organizations.domain import MembershipSource, MembershipStatus, Role
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.spatial.models import ComputeJob, GeospatialAsset, GeospatialScene, SpatialAnalysisProject
+from apps.spatial.services.compute.contracts import QuotaExceeded
 from apps.spatial.services.compute.gltf_job import canonical_bytes, triangle_fixture
 from apps.spatial.services.compute.storage import file_exists
 from apps.spatial.services.terrain_surface import height_grid_from_asc
@@ -215,11 +217,23 @@ def test_typed_uploads_stay_honest(members):
     assert terrain.json()["status"] == "published"
     note = terrain.json()["source_note"].lower()
     assert "not a surveyed" in note or "not a bare-earth" in note
-    cog = _upload(owner, "cog", b"II*\x00rest", filename="window.tif")
+    cog = _upload(owner, "cog", tiny_geographic_cog(), filename="window.tif")
     assert cog.status_code == 201
     assert cog.json()["status"] == "stored"
-    assert "not certified" in cog.json()["source_note"]
-    tiles = _upload(owner, "3dtiles", b'{"asset":{"version":"1.1"}}', filename="tileset.json")
+    assert "not a survey" in cog.json()["source_note"]
+    stub = _upload(owner, "cog", b"II*\x00rest", filename="stub.tif")
+    assert stub.status_code == 400
+    version_only = _upload(
+        owner, "3dtiles", b'{"asset":{"version":"1.1"}}', filename="version.json"
+    )
+    assert version_only.status_code == 400
+    root_only = json.dumps(
+        {
+            "asset": {"version": "1.1"},
+            "root": {"boundingVolume": {"region": [0, 0, 0, 0, 0, 1]}},
+        }
+    ).encode()
+    tiles = _upload(owner, "3dtiles", root_only, filename="tileset.json")
     assert tiles.status_code == 201
     assert "not a generated city" in tiles.json()["source_note"]
     gltf = _upload(
@@ -367,3 +381,108 @@ def test_referenced_asset_cannot_be_deleted_and_rental_stays_off(members):
 
 def test_anonymous_asset_routes_are_rejected():
     assert APIClient().get(f"{ASSETS}usage/").status_code in {401, 403}
+
+
+def _surface_product(files: dict[str, bytes]) -> dict:
+    manifest = files["manifest.json"]
+    return {
+        "source_bytes": b"ncols 1\n",
+        "source_type": "dem",
+        "source_media": "text/plain",
+        "source_suffix": ".asc",
+        "source_provenance": "DOWNLOADED",
+        "output_bytes": manifest,
+        "output_type": "terrain",
+        "output_media": "application/json",
+        "output_suffix": ".json",
+        "output_provenance": "MODELLED",
+        "output_status": "published",
+        "note": "Quantized-mesh test bundle. Not a surveyed DTM.",
+        "license_identifier": "test",
+        "attribution": "Copernicus DEM",
+        "provenance": {
+            "representation": "quantized-mesh-1.0",
+            "geoid_applied": True,
+            "survey": False,
+            "photogrammetry": False,
+            "bundle": True,
+        },
+        "output_files": files,
+    }
+
+
+def test_terrain_tile_job_streams_to_the_owning_organization(members, monkeypatch):
+    from apps.spatial.services.terrain_tiles import build_terrain_bundle
+
+    document = height_grid_from_asc(ASC, place="nairobi")
+    files = build_terrain_bundle(document)
+    monkeypatch.setattr(
+        "apps.spatial.services.compute.runner.produce_surface",
+        lambda operation, place: _surface_product(files),
+    )
+    owner = _client(members["owner"])
+    other = _client(members["other"])
+    response = owner.post(
+        JOBS,
+        {"provider_id": "local_cpu", "operation": "publish_terrain_tiles", "place": "nairobi"},
+        format="json",
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["state"] == "SUCCEEDED"
+    assert body["external_request_count"] == 0
+    assert body["actual_cost_amount"] == "0.0000"
+    assert body["output_asset_id"]
+    assert body["provenance"]["geoid_applied"] is True
+    assert body["provenance"]["survey"] is False
+    asset_id = body["output_asset_id"]
+    layer = owner.get(f"{ASSETS}{asset_id}/files/layer.json/")
+    assert layer.status_code == 200
+    assert layer["Content-Type"].startswith("application/json")
+    assert layer["Cache-Control"] == "private, max-age=300"
+    assert json.loads(b"".join(layer.streaming_content))["format"] == "quantized-mesh-1.0"
+    tile_path = next(path for path in files if path.endswith(".terrain"))
+    tile = owner.get(f"{ASSETS}{asset_id}/files/{tile_path}/")
+    assert tile.status_code == 200
+    assert tile["Content-Type"].startswith("application/vnd.quantized-mesh")
+    assert b"".join(tile.streaming_content) == files[tile_path]
+    assert other.get(f"{ASSETS}{asset_id}/files/layer.json/").status_code == 404
+    assert APIClient().get(f"{ASSETS}{asset_id}/files/layer.json/").status_code in {401, 403}
+    assert owner.get(f"{ASSETS}{asset_id}/files/../secret/").status_code == 404
+    missing = owner.get(f"{ASSETS}{asset_id}/files/99/0/0.terrain/")
+    assert missing.status_code == 404
+    single = GeospatialAsset.objects.get(kind="source")
+    assert owner.get(f"{ASSETS}{single.id}/files/layer.json/").status_code == 404
+    commercial = owner.post(
+        JOBS,
+        {"provider_id": "runpod", "operation": "publish_terrain_tiles", "place": "nairobi"},
+        format="json",
+    )
+    assert commercial.status_code == 403
+    assert commercial.json()["external_request_count"] == 0
+
+
+def test_bundle_failure_retains_the_source(members, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise QuotaExceeded("Organization storage quota was reached.")
+
+    monkeypatch.setattr(
+        "apps.spatial.services.compute.runner.produce_surface",
+        lambda operation, place: _surface_product({"manifest.json": b"{}", "layer.json": b"{}"}),
+    )
+    monkeypatch.setattr("apps.spatial.services.compute.runner.store_bundle", refuse)
+    response = _client(members["owner"]).post(
+        JOBS,
+        {"provider_id": "local_cpu", "operation": "publish_city_tiles", "place": "kisumu"},
+        format="json",
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["state"] == "FAILED"
+    assert body["output_published"] is False
+    assert body["source_retained"] is True
+    source = GeospatialAsset.objects.get()
+    assert source.kind == "source"
+    assert source.asset_type == "dem"
+    assert file_exists(str(members["org_a"].id), source.storage_key) is True
+    assert GeospatialAsset.objects.filter(kind="derived").count() == 0

@@ -45,7 +45,16 @@ STATE_CHOICES = [(item, item) for item in JOB_STATES]
 OPERATION_GLTF = "gltf_normalize"
 OPERATION_TERRAIN = "publish_terrain_surface"
 OPERATION_BUILDINGS = "publish_building_models"
-SURFACE_OPERATIONS = frozenset({OPERATION_TERRAIN, OPERATION_BUILDINGS})
+OPERATION_TERRAIN_TILES = "publish_terrain_tiles"
+OPERATION_CITY_TILES = "publish_city_tiles"
+SURFACE_OPERATIONS = frozenset(
+    {OPERATION_TERRAIN, OPERATION_BUILDINGS, OPERATION_TERRAIN_TILES, OPERATION_CITY_TILES}
+)
+# A succeeded job is reused only when this revision matches. Terrain v1 published
+# levels 10-15 only, and Cesium stopped at the empty ancestors.
+SURFACE_PRODUCT_REVISIONS = {
+    OPERATION_TERRAIN_TILES: "quantized-mesh-pyramid-v2",
+}
 FIXTURE_TRIANGLE = "triangle-v1"
 SIMULATE_FAIL_ONCE = "fail_once"
 SIMULATE_FAIL = "fail"

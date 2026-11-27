@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from django.http import FileResponse
 from rest_framework import exceptions, permissions, status, viewsets
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 
 from apps.spatial.godseye_views import _one_organization
@@ -19,9 +21,16 @@ from apps.spatial.services.asset_registry import (
     usage_payload,
 )
 from apps.spatial.services.compute.contracts import AssetInUse, ComputeError, QuotaExceeded
-from apps.spatial.services.compute.storage import resolve_compute_file
+from apps.spatial.services.compute.storage import resolve_compute_file, safe_relative
 from apps.spatial.services.request_scope import scope_member_orgs
 from apps.spatial.services.safe_paths import UnsafeSpatialPath
+
+_FILE_TYPES = {
+    ".terrain": "application/vnd.quantized-mesh",
+    ".json": "application/json",
+    ".b3dm": "application/octet-stream",
+    ".glb": "model/gltf-binary",
+}
 
 
 def _public_error(exc: ComputeError) -> exceptions.APIException:
@@ -143,3 +152,33 @@ class GeospatialAssetViewSet(viewsets.GenericViewSet):
                 ]
             }
         )
+
+
+@api_view(["GET"])
+@permission_classes([permissions.IsAuthenticated])
+def asset_file(request, asset_id, relative):
+    """Stream one file from an organization bundle. Traversal is a 404."""
+
+    organization = _one_organization(request)
+    asset = GeospatialAsset.objects.filter(
+        pk=asset_id,
+        organization=organization,
+        deleted_at__isnull=True,
+    ).first()
+    if asset is None or not asset.storage_key:
+        raise exceptions.NotFound("That asset is not available.")
+    parts = asset.storage_key.split("/")
+    owned = len(parts) >= 3 and parts[0] == str(organization.id) and parts[1] == str(asset.id)
+    if not owned:
+        raise exceptions.NotFound("That asset is not available.")
+    try:
+        safe = safe_relative(str(relative or "").rstrip("/"))
+        path = resolve_compute_file(str(organization.id), f"{parts[0]}/{parts[1]}/{safe}")
+    except UnsafeSpatialPath as exc:
+        raise exceptions.NotFound("That asset is not available.") from exc
+    media = _FILE_TYPES.get(PurePosixPath(safe).suffix, "application/octet-stream")
+    handle = path.open("rb")
+    response = FileResponse(handle, content_type=media)
+    response["Cache-Control"] = "private, max-age=300"
+    response["Content-Disposition"] = f'inline; filename="{PurePosixPath(safe).name}"'
+    return response
